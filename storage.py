@@ -51,6 +51,19 @@ class User(Base):
     plans = relationship("LessonPlan", back_populates="author")
 
 
+class Material(Base):
+    __tablename__ = "materials"
+
+    id = Column(Integer, primary_key=True, index=True)
+    filename = Column(String(300), nullable=False)
+    uploader_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    topics = Column(String(1000), nullable=True)  # comma-separated list of topics
+    path = Column(String(1000), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    uploader = relationship("User")
+
+
 def init_db() -> None:
     """Создаёт таблицы, если их ещё нет.
 
@@ -144,6 +157,20 @@ def get_lesson_plan(plan_id: int) -> Optional[LessonPlan]:
 
     with get_session() as session:
         return session.get(LessonPlan, plan_id)
+
+
+def create_material(*, filename: str, uploader_id: Optional[int], topics: Optional[str], path: Optional[str]) -> Material:
+    with get_session() as session:
+        m = Material(filename=filename, uploader_id=uploader_id, topics=topics, path=path)
+        session.add(m)
+        session.flush()
+        session.refresh(m)
+        return m
+
+
+def list_materials(limit: int = 50) -> List[Material]:
+    with get_session() as session:
+        return session.query(Material).order_by(Material.created_at.desc()).limit(limit).all()
 
 
 def create_user(*, username: str, email: Optional[str], password_hash: str, role: Optional[str] = "user") -> User:

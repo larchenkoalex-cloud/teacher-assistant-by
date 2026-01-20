@@ -5,3 +5,5 @@ SQLAlchemy>=2.0
 passlib[bcrypt]>=1.7
 # Placeholder for Deepseek SDK — remove or replace with the real package name
 # deepseek-client>=0.1.0
+python-docx>=0.8.11
+PyPDF2>=3.0.0

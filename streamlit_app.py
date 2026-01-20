@@ -14,6 +14,17 @@ from storage import (
     get_user_by_username,
 )
 from passlib.hash import bcrypt
+from pathlib import Path
+
+# docx/pdf parsing
+try:
+    import docx
+except Exception:
+    docx = None
+try:
+    from PyPDF2 import PdfReader
+except Exception:
+    PdfReader = None
 
 
 st.set_page_config(page_title="Teacher Assistant", layout="wide")
@@ -221,6 +232,83 @@ if uploaded_files:
         save_path = materials_dir / f.name
         with open(save_path, "wb") as out:
             out.write(f.getbuffer())
+
+        # Попытка извлечь темы из файла
+        suggestions = []
+        suffix = f.name.lower().rsplit('.', 1)[-1]
+        if suffix == 'docx' and docx is not None:
+            try:
+                doc = docx.Document(save_path)
+                for para in doc.paragraphs:
+                    style_name = getattr(para.style, 'name', '')
+                    text = para.text.strip()
+                    if not text:
+                        continue
+                    if style_name and 'Heading' in style_name:
+                        suggestions.append(text)
+                    elif len(text) < 80 and text.endswith(':'):
+                        suggestions.append(text.rstrip(':'))
+                if not suggestions:
+                    # fallback: collect short paragraphs
+                    for para in doc.paragraphs:
+                        t = para.text.strip()
+                        if t and len(t) < 60:
+                            suggestions.append(t)
+                suggestions = list(dict.fromkeys(suggestions))[:20]
+            except Exception:
+                suggestions = []
+        elif suffix in ('pdf',) and PdfReader is not None:
+            try:
+                reader = PdfReader(str(save_path))
+                for page in reader.pages[:20]:
+                    text = page.extract_text() or ''
+                    first_line = (text.splitlines()[0].strip() if text.splitlines() else '')
+                    if first_line:
+                        suggestions.append(first_line)
+                suggestions = list(dict.fromkeys(suggestions))[:20]
+            except Exception:
+                suggestions = []
+        else:
+            suggestions = []
+
+        # Фильтруем и показываем интерфейс выбора/редактирования тем
+        st.write(f"Файл сохранён: {save_path}")
+        st.subheader("Предложенные темы из файла")
+
+        # Список тем из существующих планов для выбора
+        existing_plans = list_lesson_plans(limit=200)
+        existing_topics = sorted({p.topic for p in existing_plans if p.topic})
+
+        chosen_topics = []
+        for i, s in enumerate(suggestions[:20]):
+            col1, col2 = st.columns([3, 2])
+            with col1:
+                text_val = st.text_input(f"Тема (строка {i+1})", value=s)
+            with col2:
+                sel = st.selectbox(f"Выбрать существующую тему {i+1}", options=['(не выбирать)'] + existing_topics, key=f"sel_{f.name}_{i}")
+            chosen = sel if sel != '(не выбирать)' else text_val
+            chosen_topics.append(chosen)
+
+        if not suggestions:
+            st.info("Не найдено явных тем в файле. Можно ввести темы вручную ниже.")
+
+        # Дополнительное поле для ввода/выбора одной темы
+        st.subheader("Добавить/выбрать тему")
+        single_topic = st.text_input("Тема (вручную или выберите существующую)", value='')
+        single_choice = st.selectbox("Или выбрать из существующих", options=['(не выбирать)'] + existing_topics, index=0)
+        if single_choice != '(не выбирать)':
+            final_topics = [single_choice]
+        else:
+            final_topics = [t for t in chosen_topics if t] + ([single_topic] if single_topic else [])
+
+        if st.button(f"Сохранить метаданные для {f.name}"):
+            from storage import create_material
+
+            topics_csv = ','.join(final_topics)
+            user_id = st.session_state.get('user_id')
+            create_material(filename=f.name, uploader_id=user_id, topics=topics_csv, path=str(save_path))
+            st.success("Метаданные материала сохранены.")
+
     st.success(f"Сохранено {len(uploaded_files)} файл(ов) в папку {materials_dir}/")
 
 st.header("Разделы")
