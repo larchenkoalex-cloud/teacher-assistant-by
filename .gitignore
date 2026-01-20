@@ -22,3 +22,11 @@ thumbs.db
 build/
 dist/
 *.egg-info/
+
+# Local DB and uploads
+teacher_assistant.db
+materials/
+streamlit.log
+streamlit.err
+.history/
+.idea/
