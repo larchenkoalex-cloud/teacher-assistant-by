@@ -16,15 +16,7 @@ from storage import (
 from passlib.hash import bcrypt
 from pathlib import Path
 
-# docx/pdf parsing
-try:
-    import docx
-except Exception:
-    docx = None
-try:
-    from PyPDF2 import PdfReader
-except Exception:
-    PdfReader = None
+from parsers import extract_topics
 
 
 st.set_page_config(page_title="Teacher Assistant", layout="wide")
@@ -233,43 +225,8 @@ if uploaded_files:
         with open(save_path, "wb") as out:
             out.write(f.getbuffer())
 
-        # Попытка извлечь темы из файла
-        suggestions = []
-        suffix = f.name.lower().rsplit('.', 1)[-1]
-        if suffix == 'docx' and docx is not None:
-            try:
-                doc = docx.Document(save_path)
-                for para in doc.paragraphs:
-                    style_name = getattr(para.style, 'name', '')
-                    text = para.text.strip()
-                    if not text:
-                        continue
-                    if style_name and 'Heading' in style_name:
-                        suggestions.append(text)
-                    elif len(text) < 80 and text.endswith(':'):
-                        suggestions.append(text.rstrip(':'))
-                if not suggestions:
-                    # fallback: collect short paragraphs
-                    for para in doc.paragraphs:
-                        t = para.text.strip()
-                        if t and len(t) < 60:
-                            suggestions.append(t)
-                suggestions = list(dict.fromkeys(suggestions))[:20]
-            except Exception:
-                suggestions = []
-        elif suffix in ('pdf',) and PdfReader is not None:
-            try:
-                reader = PdfReader(str(save_path))
-                for page in reader.pages[:20]:
-                    text = page.extract_text() or ''
-                    first_line = (text.splitlines()[0].strip() if text.splitlines() else '')
-                    if first_line:
-                        suggestions.append(first_line)
-                suggestions = list(dict.fromkeys(suggestions))[:20]
-            except Exception:
-                suggestions = []
-        else:
-            suggestions = []
+        # Попытка извлечь темы из файла с помощью общего парсера
+        suggestions = extract_topics(save_path, max_topics=20)
 
         # Фильтруем и показываем интерфейс выбора/редактирования тем
         st.write(f"Файл сохранён: {save_path}")
