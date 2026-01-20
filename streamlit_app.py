@@ -5,7 +5,15 @@ from pathlib import Path
 import requests
 import streamlit as st
 
-from storage import LessonPlan, create_lesson_plan, init_db, list_lesson_plans
+from storage import (
+    LessonPlan,
+    create_lesson_plan,
+    init_db,
+    list_lesson_plans,
+    create_user,
+    get_user_by_username,
+)
+from passlib.hash import bcrypt
 
 
 st.set_page_config(page_title="Teacher Assistant", layout="wide")
@@ -17,6 +25,61 @@ st.title("Teacher Assistant — помощник для учителя")
 
 st.sidebar.header("Настройки")
 api_key = st.sidebar.text_input("Deepseek API key (опционально)", type="password")
+
+# --- Простая аутентификация для педагогов (регистрация / вход)
+if "user_id" not in st.session_state:
+    st.session_state["user_id"] = None
+    st.session_state["username"] = None
+
+auth_mode = st.sidebar.selectbox("Аккаунт", ["Войти", "Регистрация", "Профиль"])
+if auth_mode == "Регистрация":
+    with st.sidebar.form("register_form"):
+        reg_username = st.text_input("Логин")
+        reg_email = st.text_input("Email (опционально)")
+        reg_password = st.text_input("Пароль", type="password")
+        reg_password2 = st.text_input("Повторите пароль", type="password")
+        if st.form_submit_button("Зарегистрироваться"):
+            if not reg_username or not reg_password:
+                st.sidebar.warning("Укажите логин и пароль.")
+            elif reg_password != reg_password2:
+                st.sidebar.warning("Пароли не совпадают.")
+            elif get_user_by_username(reg_username):
+                st.sidebar.warning("Пользователь с таким логином уже существует.")
+            else:
+                pwd_hash = bcrypt.hash(reg_password)
+                user = create_user(username=reg_username, email=reg_email or None, password_hash=pwd_hash)
+                st.session_state["user_id"] = user.id
+                st.session_state["username"] = user.username
+                st.sidebar.success("Регистрация прошла успешно. Вы вошли как {}".format(user.username))
+
+elif auth_mode == "Войти":
+    with st.sidebar.form("login_form"):
+        login_username = st.text_input("Логин")
+        login_password = st.text_input("Пароль", type="password")
+        if st.form_submit_button("Войти"):
+            user = get_user_by_username(login_username)
+            if not user:
+                st.sidebar.error("Пользователь не найден.")
+            else:
+                try:
+                    if bcrypt.verify(login_password, user.password_hash):
+                        st.session_state["user_id"] = user.id
+                        st.session_state["username"] = user.username
+                        st.sidebar.success(f"Вы вошли как {user.username}")
+                    else:
+                        st.sidebar.error("Неверный пароль.")
+                except Exception:
+                    st.sidebar.error("Ошибка проверки пароля.")
+
+else:  # Профиль
+    if st.session_state.get("user_id"):
+        st.sidebar.write(f"Вошли как: {st.session_state.get('username')}")
+        if st.sidebar.button("Выйти"):
+            st.session_state["user_id"] = None
+            st.session_state["username"] = None
+            st.sidebar.success("Вы вышли.")
+    else:
+        st.sidebar.info("Войдите или зарегистрируйтесь, чтобы публиковать материалы.")
 
 materials_dir = Path(os.getenv("MATERIALS_DIR", "materials"))
 materials_dir.mkdir(exist_ok=True)
@@ -72,6 +135,7 @@ with col_form:
             "Deepseek API (через ключ)",
         ],
     )
+    visibility = st.selectbox("Видимость плана", ["public", "private", "pending"], index=0)
     generate_clicked = st.button("Сгенерировать план урока")
 
 with col_preview:
@@ -129,6 +193,7 @@ if generate_clicked:
                 plan_text = generate_lesson_plan_locally(subject, grade, topic, notes)
 
             title = f"{subject or 'Урок'} — {topic}"[:200]
+            status = "published" if visibility == "public" else ("pending" if visibility == "pending" else "private")
             create_lesson_plan(
                 title=title,
                 subject=subject,
@@ -138,6 +203,9 @@ if generate_clicked:
                 content=plan_text,
                 model_name=model_name,
                 model_version=model_version,
+                author_id=st.session_state.get("user_id"),
+                visibility=visibility,
+                status=status,
             )
 
         st.success("План урока сохранён.")

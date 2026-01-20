@@ -1,5 +1,7 @@
 streamlit>=1.20
 requests>=2.28
 SQLAlchemy>=2.0
+# Password hashing for user authentication
+passlib[bcrypt]>=1.7
 # Placeholder for Deepseek SDK — remove or replace with the real package name
 # deepseek-client>=0.1.0

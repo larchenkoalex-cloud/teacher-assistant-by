@@ -3,8 +3,9 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterable, List, Optional
 
-from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine
+from sqlalchemy import Column, DateTime, Integer, String, Text, ForeignKey, create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
+from sqlalchemy.orm import relationship
 
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///teacher_assistant.db")
@@ -29,7 +30,25 @@ class LessonPlan(Base):
     content = Column(Text, nullable=False)  # текст плана урока (Markdown / обычный текст)
     model_name = Column(String(100), nullable=True)
     model_version = Column(String(100), nullable=True)
+    author_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    visibility = Column(String(20), nullable=False, default="public")  # public/private/pending
+    status = Column(String(20), nullable=False, default="published")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    author = relationship("User", back_populates="plans")
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(100), unique=True, nullable=False, index=True)
+    email = Column(String(200), unique=True, nullable=True)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(50), nullable=True, default="user")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    plans = relationship("LessonPlan", back_populates="author")
 
 
 def init_db() -> None:
@@ -65,6 +84,9 @@ def create_lesson_plan(
     content: str,
     model_name: Optional[str] = None,
     model_version: Optional[str] = None,
+    author_id: Optional[int] = None,
+    visibility: str = "public",
+    status: str = "published",
 ) -> LessonPlan:
     """Создаёт и сохраняет план урока в базе."""
 
@@ -78,6 +100,9 @@ def create_lesson_plan(
             content=content,
             model_name=model_name,
             model_version=model_version,
+            author_id=author_id,
+            visibility=visibility,
+            status=status,
         )
         session.add(plan)
         session.flush()  # чтобы получить id до commit
@@ -119,3 +144,22 @@ def get_lesson_plan(plan_id: int) -> Optional[LessonPlan]:
 
     with get_session() as session:
         return session.get(LessonPlan, plan_id)
+
+
+def create_user(*, username: str, email: Optional[str], password_hash: str, role: Optional[str] = "user") -> User:
+    with get_session() as session:
+        user = User(username=username, email=email, password_hash=password_hash, role=role)
+        session.add(user)
+        session.flush()
+        session.refresh(user)
+        return user
+
+
+def get_user_by_username(username: str) -> Optional[User]:
+    with get_session() as session:
+        return session.query(User).filter(User.username == username).one_or_none()
+
+
+def get_user_by_email(email: str) -> Optional[User]:
+    with get_session() as session:
+        return session.query(User).filter(User.email == email).one_or_none()
