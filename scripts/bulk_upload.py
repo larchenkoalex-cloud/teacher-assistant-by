@@ -29,6 +29,8 @@ def main() -> None:
             uploader_id=uploader_id,
             topics=topics_csv or None,
             path=str(path),
+            subject=None,
+            grade=None,
         )
         created += 1
 

@@ -12,12 +12,33 @@ from storage import (
     list_lesson_plans,
     create_user,
     get_user_by_username,
+    list_materials,
+    delete_material,
 )
 from passlib.hash import bcrypt
 from pathlib import Path
 
-from parsers import extract_topics
+from parsers import extract_topics, extract_full_text
 
+
+IS_DEV_ADMIN = True  # в режиме разработки считаем текущего пользователя администратором
+
+SUBJECTS = [
+    "Математика",
+    "Русский язык",
+    "Литература",
+    "Белорусский язык",
+    "Иностранный язык (английский)",
+    "Информатика",
+    "Физика",
+    "Химия",
+    "Биология",
+    "История",
+    "Обществоведение",
+    "География",
+]
+
+GRADES = [f"{i} класс" for i in range(1, 12)]
 
 st.set_page_config(page_title="Teacher Assistant", layout="wide")
 
@@ -28,6 +49,9 @@ st.title("Teacher Assistant — помощник для учителя")
 
 st.sidebar.header("Настройки")
 api_key = st.sidebar.text_input("Deepseek API key (опционально)", type="password")
+
+# Переключение между пользовательским режимом и админ-панелью
+app_mode = st.sidebar.radio("Режим", ["Пользовательский режим", "Админ-панель"])
 
 # --- Простая аутентификация для педагогов (регистрация / вход)
 if "user_id" not in st.session_state:
@@ -84,8 +108,26 @@ else:  # Профиль
     else:
         st.sidebar.info("Войдите или зарегистрируйтесь, чтобы публиковать материалы.")
 
+current_user = None
+if st.session_state.get("username"):
+    current_user = get_user_by_username(st.session_state["username"])
+
 materials_dir = Path(os.getenv("MATERIALS_DIR", "materials"))
 materials_dir.mkdir(exist_ok=True)
+
+
+def is_admin() -> bool:
+    """Проверка, является ли текущий пользователь администратором.
+
+    В режиме разработки (IS_DEV_ADMIN=True) всегда возвращает True,
+    чтобы упростить локальную работу.
+    """
+
+    if IS_DEV_ADMIN:
+        return True
+    if current_user and getattr(current_user, "role", "user") == "admin":
+        return True
+    return False
 
 
 def _slugify(value: str) -> str:
@@ -94,6 +136,25 @@ def _slugify(value: str) -> str:
     value = value.strip().lower().replace(" ", "_")
     allowed = "abcdefghijklmnopqrstuvwxyz0123456789_-"
     return "".join(ch for ch in value if ch in allowed)[:60] or "lesson_plan"
+
+
+def safe_rerun() -> None:
+    """Безопасно перезапускает скрипт Streamlit с несколькими fallback-опциями.
+
+    В некоторых версиях Streamlit `st.experimental_rerun` может быть недоступен.
+    Пытаемся вызвать его, затем пытаемся поднять внутреннее `RerunException`,
+    а если и это не работает — помечаем `st.session_state` и вызываем `st.stop()`.
+    """
+    try:
+        st.experimental_rerun()
+    except Exception:
+        try:
+            from streamlit.runtime.scriptrunner.script_runner import RerunException
+
+            raise RerunException()
+        except Exception:
+            st.session_state["_rerun_indicator"] = st.session_state.get("_rerun_indicator", 0) + 1
+            st.stop()
 
 
 def generate_lesson_plan_locally(subject: str, grade: str, topic: str, notes: str) -> str:
@@ -127,9 +188,9 @@ st.header("Генерация плана урока (ИИ)")
 col_form, col_preview = st.columns(2)
 
 with col_form:
-    subject = st.text_input("Предмет", placeholder="Математика, История, Русский язык и т.д.")
-    grade = st.text_input("Класс / курс", placeholder="5 класс, 10 класс, колледж...")
-    topic = st.text_input("Тема урока", placeholder="Десятичные дроби", help="Ключевая тема занятия")
+    subject = st.selectbox("Предмет", SUBJECTS, index=0, key="gen_subject")
+    grade = st.selectbox("Класс / курс", GRADES, index=3, key="gen_grade")
+    topic = st.text_input("Тема урока", placeholder="Десятичные дроби", help="Ключевая тема занятия", key="gen_topic")
     notes = st.text_area("Особенности класса / пожелания", placeholder="Уровень класса, акценты, что важно подчеркнуть...")
     model_choice = st.selectbox(
         "Источник генерации",
@@ -139,6 +200,33 @@ with col_form:
         ],
     )
     visibility = st.selectbox("Видимость плана", ["public", "private", "pending"], index=0)
+
+    # Подсказки тем из существующих материалов и планов для выбранного предмета и класса
+    existing_plans = list_lesson_plans(limit=300)
+    existing_materials = list_materials(limit=300)
+
+    topic_candidates = set()
+    for p in existing_plans:
+        if p.subject == subject and p.grade == grade and p.topic:
+            topic_candidates.add(p.topic)
+    for m in existing_materials:
+        if getattr(m, "subject", None) == subject and getattr(m, "grade", None) == grade and m.topics:
+            for t in m.topics.split(","):
+                t = t.strip()
+                if t:
+                    topic_candidates.add(t)
+
+    typed = st.session_state.get("gen_topic", "") or ""
+    if typed:
+        matches = [t for t in topic_candidates if typed.lower() in t.lower()]
+        matches = sorted(matches)[:10]
+        if matches:
+            st.caption("Возможные темы из КТП и планов:")
+            for i, t in enumerate(matches):
+                if st.button(t, key=f"suggest_topic_{i}"):
+                    st.session_state["gen_topic"] = t
+                    safe_rerun()
+
     generate_clicked = st.button("Сгенерировать план урока")
 
 with col_preview:
@@ -212,113 +300,181 @@ if generate_clicked:
             )
 
         st.success("План урока сохранён.")
-        st.experimental_rerun()
+        safe_rerun()
 
-st.header("Загрузка материалов")
-uploaded_files = st.file_uploader(
-    "Загрузите конспекты или раздаточные материалы",
-    accept_multiple_files=True,
-)
-if uploaded_files:
-    for f in uploaded_files:
-        save_path = materials_dir / f.name
-        with open(save_path, "wb") as out:
-            out.write(f.getbuffer())
+if app_mode == "Пользовательский режим":
+    st.header("Разделы")
+    cols = st.columns(3)
+    with cols[0]:
+        st.subheader("Конспекты")
+        for p in sorted(materials_dir.glob("*.docx"))[:10]:
+            st.write(p.name)
+    with cols[1]:
+        st.subheader("Раздаточный материал")
+        for p in sorted(materials_dir.glob("*.pdf"))[:10]:
+            st.write(p.name)
+    with cols[2]:
+        st.subheader("Викторины")
+        st.write("Добавьте викторины в формате .json или .csv")
 
-        # Попытка извлечь темы из файла с помощью общего парсера
-        suggestions = extract_topics(save_path, max_topics=20)
-
-        # Фильтруем и показываем интерфейс выбора/редактирования тем
-        st.write(f"Файл сохранён: {save_path}")
-        st.subheader("Предложенные темы из файла")
-
-        # Список тем из существующих планов для выбора
-        existing_plans = list_lesson_plans(limit=200)
-        existing_topics = sorted({p.topic for p in existing_plans if p.topic})
-
-        chosen_topics = []
-        for i, s in enumerate(suggestions[:20]):
-            col1, col2 = st.columns([3, 2])
-            with col1:
-                text_val = st.text_input(f"Тема (строка {i+1})", value=s)
-            with col2:
-                sel = st.selectbox(f"Выбрать существующую тему {i+1}", options=['(не выбирать)'] + existing_topics, key=f"sel_{f.name}_{i}")
-            chosen = sel if sel != '(не выбирать)' else text_val
-            chosen_topics.append(chosen)
-
-        if not suggestions:
-            st.info("Не найдено явных тем в файле. Можно ввести темы вручную ниже.")
-
-        # Дополнительное поле для ввода/выбора одной темы
-        st.subheader("Добавить/выбрать тему")
-        single_topic = st.text_input("Тема (вручную или выберите существующую)", value='')
-        single_choice = st.selectbox("Или выбрать из существующих", options=['(не выбирать)'] + existing_topics, index=0)
-        if single_choice != '(не выбирать)':
-            final_topics = [single_choice]
+    st.header("Поиск по материалам / Deepseek")
+    query = st.text_input("Введите запрос")
+    if st.button("Поиск"):
+        if not query:
+            st.warning("Введите запрос.")
         else:
-            final_topics = [t for t in chosen_topics if t] + ([single_topic] if single_topic else [])
+            with st.spinner("Выполняю поиск..."):
+                results = []
+                # Заглушка для Deepseek — замените на реальную реализацию
+                if api_key:
+                    try:
+                        # Пример вызова — замените URL/параметры под реальный API
+                        resp = requests.post(
+                            "https://api.deepseek.example/search",
+                            headers={"Authorization": f"Bearer {api_key}"},
+                            json={"query": query},
+                            timeout=10,
+                        )
+                        resp.raise_for_status()
+                        results = resp.json().get("results", [])
+                    except Exception:
+                        results = [{"title": "(заглушка) Результат A", "snippet": "Проверьте конфигурацию Deepseek API."}]
+                else:
+                    # Локальная имитация поиска по названиям файлов
+                    for p in materials_dir.glob("**/*"):
+                        if query.lower() in p.name.lower():
+                            results.append({"title": p.name, "snippet": f"Файл: {p}"})
 
-        if st.button(f"Сохранить метаданные для {f.name}"):
-            from storage import create_material
+                if results:
+                    for r in results:
+                        st.markdown(f"**{r.get('title')}**")
+                        st.write(r.get('snippet'))
+                else:
+                    st.info("Ничего не найдено.")
 
-            topics_csv = ','.join(final_topics)
-            user_id = st.session_state.get('user_id')
-            create_material(filename=f.name, uploader_id=user_id, topics=topics_csv, path=str(save_path))
-            st.success("Метаданные материала сохранены.")
-
-    st.success(f"Сохранено {len(uploaded_files)} файл(ов) в папку {materials_dir}/")
-
-st.header("Разделы")
-cols = st.columns(3)
-with cols[0]:
-    st.subheader("Конспекты")
-    for p in sorted(materials_dir.glob("*.docx"))[:10]:
-        st.write(p.name)
-with cols[1]:
-    st.subheader("Раздаточный материал")
-    for p in sorted(materials_dir.glob("*.pdf"))[:10]:
-        st.write(p.name)
-with cols[2]:
-    st.subheader("Викторины")
-    st.write("Добавьте викторины в формате .json или .csv")
-
-st.header("Поиск по материалам / Deepseek")
-query = st.text_input("Введите запрос")
-if st.button("Поиск"):
-    if not query:
-        st.warning("Введите запрос.")
+elif app_mode == "Админ-панель":
+    st.header("Админ-панель")
+    if not is_admin():
+        st.error("Доступ к админ-панели есть только у администратора.")
     else:
-        with st.spinner("Выполняю поиск..."):
-            results = []
-            # Заглушка для Deepseek — замените на реальную реализацию
-            if api_key:
-                try:
-                    # Пример вызова — замените URL/параметры под реальный API
-                    resp = requests.post(
-                        "https://api.deepseek.example/search",
-                        headers={"Authorization": f"Bearer {api_key}"},
-                        json={"query": query},
-                        timeout=10,
+        st.subheader("Загрузка материалов")
+        st.caption("Сначала выберите предмет и класс, затем загрузите файл КТП/материала.")
+        upload_subject = st.selectbox("Предмет для загружаемых материалов", SUBJECTS, index=0, key="upload_subject")
+        upload_grade = st.selectbox("Класс для загружаемых материалов", GRADES, index=3, key="upload_grade")
+        uploaded_files = st.file_uploader(
+            "Загрузите конспекты или раздаточные материалы",
+            accept_multiple_files=True,
+        )
+        if uploaded_files:
+            for f in uploaded_files:
+                save_path = materials_dir / f.name
+                with open(save_path, "wb") as out:
+                    out.write(f.getbuffer())
+
+
+                # Попытка извлечь темы из файла с помощью общего парсера
+                suggestions = extract_topics(save_path, max_topics=50)
+
+                # Извлекаем весь текст файла построчно для ручной правки
+                full_lines = extract_full_text(save_path)
+
+                st.write(f"Файл сохранён: {save_path}")
+                st.caption("Отредактируйте строки и отметьте те, которые являются темами")
+
+                # Список тем из существующих планов для выбора (выпадашки скрываем, если пусто)
+                existing_plans = list_lesson_plans(limit=200)
+                existing_topics = sorted({p.topic for p in existing_plans if p.topic})
+
+                # Инициализация session_state для строк и чекбоксов
+                for i, line in enumerate(full_lines):
+                    key_text = f"{f.name}_text_{i}"
+                    key_pick = f"{f.name}_pick_{i}"
+                    if key_text not in st.session_state:
+                        st.session_state[key_text] = line
+                    # помечаем как предложенную тему, если строка похожа на suggestion
+                    initial_pick = any(s.strip().lower() in line.strip().lower() for s in suggestions)
+                    if key_pick not in st.session_state:
+                        st.session_state[key_pick] = initial_pick
+
+                with st.expander("Просмотр и разметка строк (нажмите, чтобы открыть)"):
+                    for i, line in enumerate(full_lines):
+                        key_text = f"{f.name}_text_{i}"
+                        key_pick = f"{f.name}_pick_{i}"
+                        col1, col2 = st.columns([0.08, 0.92])
+                        with col1:
+                            st.checkbox("", value=st.session_state.get(key_pick, False), key=key_pick)
+                        with col2:
+                            st.text_input(f"Строка {i+1}", key=key_text)
+
+                # Дополнительные возможности: добавить пустую строку как тему
+                if st.button(f"Добавить пустую строку для {f.name}"):
+                    idx = len(full_lines)
+                    key_text = f"{f.name}_text_{idx}"
+                    key_pick = f"{f.name}_pick_{idx}"
+                    st.session_state[key_text] = ""
+                    st.session_state[key_pick] = True
+                    safe_rerun()
+
+                if st.button(f"Сохранить метаданные для {f.name}"):
+                    from storage import create_material
+
+                    picks = []
+                    for i in range(len(full_lines)):
+                        key_text = f"{f.name}_text_{i}"
+                        key_pick = f"{f.name}_pick_{i}"
+                        if st.session_state.get(key_pick):
+                            txt = st.session_state.get(key_text, "").strip()
+                            if txt:
+                                picks.append(txt)
+
+                    topics_csv = ','.join(dict.fromkeys(picks)) if picks else None
+                    user_id = st.session_state.get('user_id')
+                    create_material(
+                        filename=f.name,
+                        uploader_id=user_id,
+                        topics=topics_csv,
+                        path=str(save_path),
+                        subject=upload_subject,
+                        grade=upload_grade,
                     )
-                    resp.raise_for_status()
-                    results = resp.json().get("results", [])
-                except Exception:
-                    results = [{"title": "(заглушка) Результат A", "snippet": "Проверьте конфигурацию Deepseek API."}]
-            else:
-                # Локальная имитация поиска по названиям файлов
-                for p in materials_dir.glob("**/*"):
-                    if query.lower() in p.name.lower():
-                        results.append({"title": p.name, "snippet": f"Файл: {p}"})
+                    st.success("Метаданные материала сохранены.")
 
-            if results:
-                for r in results:
-                    st.markdown(f"**{r.get('title')}**")
-                    st.write(r.get('snippet'))
-            else:
-                st.info("Ничего не найдено.")
+            st.success(f"Сохранено {len(uploaded_files)} файл(ов) в папку {materials_dir}/")
 
-st.markdown("---")
+        st.subheader("Материалы (обзор и управление)")
+        topic_filter = st.text_input("Фильтр по темам материалов (подстрока)")
+        materials = list_materials(limit=200)
+        if not materials:
+            st.info("Пока нет сохранённых метаданных материалов. Загрузите файлы выше или используйте bulk_upload.")
+        else:
+            for m in materials:
+                if topic_filter and (not m.topics or topic_filter.lower() not in m.topics.lower()):
+                    continue
+                st.markdown(f"**{m.filename}**")
+                st.caption(f"Темы: {m.topics or '—'}")
+                if m.path and Path(m.path).exists():
+                    with open(m.path, "rb") as fh:
+                        st.download_button(
+                            label="Скачать файл",
+                            data=fh.read(),
+                            file_name=Path(m.path).name,
+                            key=f"material_download_{m.id}",
+                        )
+
+                if st.button("Удалить материал", key=f"delete_material_{m.id}"):
+                    if m.path and Path(m.path).exists():
+                        try:
+                            os.remove(m.path)
+                        except Exception:
+                            pass
+
+                    delete_material(m.id)
+                    st.success("Материал удалён.")
+                    safe_rerun()
+
+                st.markdown("---")
+
 st.caption(
-    "Минимальная версия с генерацией планов уроков. Далее можно добавить аутентификацию, "
-    "управление правами доступа и интеграцию с реальным Deepseek/GPT API.",
+    "Версия с генерацией планов уроков, базовой аутентификацией и загрузкой материалов. "
+    "Далее можно добавить модерацию, публичный каталог и интеграцию с Deepseek/GPT API.",
 )

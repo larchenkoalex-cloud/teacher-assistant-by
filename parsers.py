@@ -20,21 +20,40 @@ def extract_topics_from_docx(path: Path, max_topics: int = 20) -> List[str]:
 
     topics: List[str] = []
     doc = docx.Document(path)
-    for para in doc.paragraphs:
-        style_name = getattr(para.style, "name", "")
-        text = para.text.strip()
-        if not text:
-            continue
-        if style_name and "Heading" in style_name:
-            topics.append(text)
-        elif len(text) < 80 and text.endswith(":"):
-            topics.append(text.rstrip(":"))
+
+    def _collect_from_paragraphs(paragraphs) -> None:
+        for para in paragraphs:
+            style_name = getattr(para.style, "name", "")
+            text = para.text.strip()
+            if not text:
+                continue
+            if style_name and "Heading" in style_name:
+                topics.append(text)
+            elif len(text) < 80 and text.endswith(":"):
+                topics.append(text.rstrip(":"))
+
+    # 1) Обычные абзацы
+    _collect_from_paragraphs(doc.paragraphs)
+
+    # 2) Текст внутри таблиц (часто КТП оформлены таблицами)
+    for table in getattr(doc, "tables", []):
+        for row in table.rows:
+            for cell in row.cells:
+                _collect_from_paragraphs(cell.paragraphs)
+
     if not topics:
-        # Fallback: короткие абзацы
-        for para in doc.paragraphs:
-            t = para.text.strip()
-            if t and len(t) < 60:
-                topics.append(t)
+        # Fallback: короткие абзацы (в том числе из таблиц)
+        def _collect_short(paragraphs) -> None:
+            for para in paragraphs:
+                t = para.text.strip()
+                if t and 2 < len(t) < 60:
+                    topics.append(t)
+
+        _collect_short(doc.paragraphs)
+        for table in getattr(doc, "tables", []):
+            for row in table.rows:
+                for cell in row.cells:
+                    _collect_short(cell.paragraphs)
     # уникальные, максимум max_topics
     seen = set()
     result: List[str] = []
@@ -77,3 +96,44 @@ def extract_topics(path: Path, max_topics: int = 20) -> List[str]:
     if suffix == ".pdf":
         return extract_topics_from_pdf(path, max_topics=max_topics)
     return []
+
+
+def extract_full_text(path: Path) -> List[str]:
+    """Возвращает список строк полного текста документа (docx / pdf).
+
+    Удобно для отображения и ручной пометки строк как тем.
+    """
+    suffix = path.suffix.lower()
+    lines: List[str] = []
+    if suffix == ".docx":
+        if docx is None:
+            return []
+        doc = docx.Document(path)
+
+        # Сначала абзацы в порядке документа
+        for para in doc.paragraphs:
+            t = para.text.strip()
+            if t:
+                lines.append(t)
+
+        # Затем содержимое таблиц (если есть)
+        for table in getattr(doc, "tables", []):
+            for row in table.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
+                        t = para.text.strip()
+                        if t:
+                            lines.append(t)
+
+    elif suffix == ".pdf":
+        if PdfReader is None:
+            return []
+        reader = PdfReader(str(path))
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            for ln in text.splitlines():
+                t = ln.strip()
+                if t:
+                    lines.append(t)
+
+    return lines

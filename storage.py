@@ -13,7 +13,13 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///teacher_assistant.db")
 # Настройка движка: для SQLite добавляем специальные опции
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args, future=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine,
+    future=True,
+    expire_on_commit=False,
+)
 
 Base = declarative_base()
 
@@ -59,6 +65,8 @@ class Material(Base):
     uploader_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     topics = Column(String(1000), nullable=True)  # comma-separated list of topics
     path = Column(String(1000), nullable=True)
+    subject = Column(String(100), nullable=True)
+    grade = Column(String(50), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     uploader = relationship("User")
@@ -159,9 +167,24 @@ def get_lesson_plan(plan_id: int) -> Optional[LessonPlan]:
         return session.get(LessonPlan, plan_id)
 
 
-def create_material(*, filename: str, uploader_id: Optional[int], topics: Optional[str], path: Optional[str]) -> Material:
+def create_material(
+    *,
+    filename: str,
+    uploader_id: Optional[int],
+    topics: Optional[str],
+    path: Optional[str],
+    subject: Optional[str] = None,
+    grade: Optional[str] = None,
+) -> Material:
     with get_session() as session:
-        m = Material(filename=filename, uploader_id=uploader_id, topics=topics, path=path)
+        m = Material(
+            filename=filename,
+            uploader_id=uploader_id,
+            topics=topics,
+            path=path,
+            subject=subject,
+            grade=grade,
+        )
         session.add(m)
         session.flush()
         session.refresh(m)
@@ -171,6 +194,17 @@ def create_material(*, filename: str, uploader_id: Optional[int], topics: Option
 def list_materials(limit: int = 50) -> List[Material]:
     with get_session() as session:
         return session.query(Material).order_by(Material.created_at.desc()).limit(limit).all()
+
+
+def delete_material(material_id: int) -> bool:
+    """Удаляет материал по id. Возвращает True, если материал найден и удалён."""
+
+    with get_session() as session:
+        material = session.get(Material, material_id)
+        if not material:
+            return False
+        session.delete(material)
+        return True
 
 
 def create_user(*, username: str, email: Optional[str], password_hash: str, role: Optional[str] = "user") -> User:
