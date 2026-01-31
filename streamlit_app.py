@@ -29,6 +29,8 @@ from passlib.hash import bcrypt
 
 from parsers import extract_topics, extract_full_text
 import json
+from text_normalizer import normalize_ai_markdown
+from markdown_utils import markdown_to_html
 
 
 def generate_with_deepseek(api_key: str, prompt: str, model: str = "deepseek/deepseek-chat") -> dict:
@@ -773,7 +775,11 @@ with col_editor:
                 full_text = generate_lesson_plan_locally(subject, grade, topic, notes, class_level)
 
             st.session_state["stream_buffer"] = full_text
-            st.session_state["editor_html"] = _markdown_to_html(_postprocess_plan_text(full_text))
+            # Единственное место, где ИИ влияет на содержимое редактора — нормализуем Markdown, конвертируем в HTML и загружаем.
+            raw_md = full_text
+            md = normalize_ai_markdown(raw_md)
+            html_value = markdown_to_html(md)
+            st.session_state["editor_html"] = html_value
             st.session_state["editor_instance"] = st.session_state.get("editor_instance", 0) + 1
             st.session_state["is_generating"] = False
 
@@ -785,8 +791,9 @@ with col_editor:
         # Если есть сгенерированный план (из предыдущего запуска), переместим его в editor_* перед созданием виджетов
         if "generated_content" in st.session_state:
             raw = st.session_state.pop("generated_content")
-            # В генерации приходит Markdown — конвертируем в HTML для визуального редактора.
-            st.session_state["editor_html"] = _markdown_to_html(_postprocess_plan_text(raw))
+            # Входной текст — Markdown от ИИ: нормализуем и конвертируем в HTML для редактора.
+            md = normalize_ai_markdown(raw)
+            st.session_state["editor_html"] = markdown_to_html(md)
             st.session_state["editor_instance"] = st.session_state.get("editor_instance", 0) + 1
         if "generated_title" in st.session_state:
             st.session_state["editor_title"] = st.session_state.pop("generated_title")
