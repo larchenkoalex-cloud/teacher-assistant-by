@@ -1,226 +1,43 @@
-import os
-from contextlib import contextmanager
-from datetime import datetime
-from typing import Iterable, List, Optional
+"""Compatibility facade.
 
-from sqlalchemy import Column, DateTime, Integer, String, Text, ForeignKey, create_engine
-from sqlalchemy.orm import Session, declarative_base, sessionmaker
-from sqlalchemy.orm import relationship
+`streamlit_app.py` and scripts historically imported DB models and CRUD helpers
+from `storage.py`. For scalability and clearer layering, the implementation has
+moved to `teacher_assistant.db.*`, while this module re-exports the same public
+API to avoid breaking imports.
+"""
 
-
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///teacher_assistant.db")
-
-# Настройка движка: для SQLite добавляем специальные опции
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args, future=True)
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine,
-    future=True,
-    expire_on_commit=False,
+from teacher_assistant.db.base import Base
+from teacher_assistant.db.database import DATABASE_URL, SessionLocal, engine, get_session, init_db
+from teacher_assistant.db.models import LessonPlan, Material, User
+from teacher_assistant.db.repositories import (
+    create_lesson_plan,
+    create_material,
+    create_user,
+    delete_material,
+    get_lesson_plan,
+    get_user_by_email,
+    get_user_by_username,
+    list_lesson_plans,
+    list_materials,
 )
 
-Base = declarative_base()
-
-
-class LessonPlan(Base):
-    __tablename__ = "lesson_plans"
-
-    id = Column(Integer, primary_key=True, index=True)
-    title = Column(String(255), nullable=False)
-    subject = Column(String(100), nullable=True)
-    grade = Column(String(50), nullable=True)
-    topic = Column(String(255), nullable=True)
-    tags = Column(String(255), nullable=True)  # простая строка с тегами через запятую
-    content = Column(Text, nullable=False)  # текст плана урока (Markdown / обычный текст)
-    model_name = Column(String(100), nullable=True)
-    model_version = Column(String(100), nullable=True)
-    author_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    visibility = Column(String(20), nullable=False, default="public")  # public/private/pending
-    status = Column(String(20), nullable=False, default="published")
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    author = relationship("User", back_populates="plans")
-
-
-class User(Base):
-    __tablename__ = "users"
-
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(100), unique=True, nullable=False, index=True)
-    email = Column(String(200), unique=True, nullable=True)
-    password_hash = Column(String(255), nullable=False)
-    role = Column(String(50), nullable=True, default="user")
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    plans = relationship("LessonPlan", back_populates="author")
-
-
-class Material(Base):
-    __tablename__ = "materials"
-
-    id = Column(Integer, primary_key=True, index=True)
-    filename = Column(String(300), nullable=False)
-    uploader_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    topics = Column(String(1000), nullable=True)  # comma-separated list of topics
-    path = Column(String(1000), nullable=True)
-    subject = Column(String(100), nullable=True)
-    grade = Column(String(50), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    uploader = relationship("User")
-
-
-def init_db() -> None:
-    """Создаёт таблицы, если их ещё нет.
-
-    Для небольшого проекта этого достаточно; при переходе на Postgres можно
-    оставить тот же код, просто поменяв DATABASE_URL.
-    """
-
-    Base.metadata.create_all(bind=engine)
-
-
-@contextmanager
-def get_session() -> Iterable[Session]:
-    session: Session = SessionLocal()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
-
-
-def create_lesson_plan(
-    *,
-    title: str,
-    subject: Optional[str] = None,
-    grade: Optional[str] = None,
-    topic: Optional[str] = None,
-    tags: Optional[str] = None,
-    content: str,
-    model_name: Optional[str] = None,
-    model_version: Optional[str] = None,
-    author_id: Optional[int] = None,
-    visibility: str = "public",
-    status: str = "published",
-) -> LessonPlan:
-    """Создаёт и сохраняет план урока в базе."""
-
-    with get_session() as session:
-        plan = LessonPlan(
-            title=title,
-            subject=subject,
-            grade=grade,
-            topic=topic,
-            tags=tags,
-            content=content,
-            model_name=model_name,
-            model_version=model_version,
-            author_id=author_id,
-            visibility=visibility,
-            status=status,
-        )
-        session.add(plan)
-        session.flush()  # чтобы получить id до commit
-        session.refresh(plan)
-        return plan
-
-
-def list_lesson_plans(
-    *,
-    limit: int = 50,
-    search_query: Optional[str] = None,
-    subject: Optional[str] = None,
-    grade: Optional[str] = None,
-) -> List[LessonPlan]:
-    """Возвращает список последних планов уроков с простыми фильтрами."""
-
-    with get_session() as session:
-        query = session.query(LessonPlan).order_by(LessonPlan.created_at.desc())
-
-        if search_query:
-            like = f"%{search_query}%"
-            query = query.filter(
-                (LessonPlan.title.ilike(like))
-                | (LessonPlan.topic.ilike(like))
-                | (LessonPlan.content.ilike(like))
-            )
-
-        if subject:
-            query = query.filter(LessonPlan.subject == subject)
-
-        if grade:
-            query = query.filter(LessonPlan.grade == grade)
-
-        return query.limit(limit).all()
-
-
-def get_lesson_plan(plan_id: int) -> Optional[LessonPlan]:
-    """Возвращает один план урока по id или None."""
-
-    with get_session() as session:
-        return session.get(LessonPlan, plan_id)
-
-
-def create_material(
-    *,
-    filename: str,
-    uploader_id: Optional[int],
-    topics: Optional[str],
-    path: Optional[str],
-    subject: Optional[str] = None,
-    grade: Optional[str] = None,
-) -> Material:
-    with get_session() as session:
-        m = Material(
-            filename=filename,
-            uploader_id=uploader_id,
-            topics=topics,
-            path=path,
-            subject=subject,
-            grade=grade,
-        )
-        session.add(m)
-        session.flush()
-        session.refresh(m)
-        return m
-
-
-def list_materials(limit: int = 50) -> List[Material]:
-    with get_session() as session:
-        return session.query(Material).order_by(Material.created_at.desc()).limit(limit).all()
-
-
-def delete_material(material_id: int) -> bool:
-    """Удаляет материал по id. Возвращает True, если материал найден и удалён."""
-
-    with get_session() as session:
-        material = session.get(Material, material_id)
-        if not material:
-            return False
-        session.delete(material)
-        return True
-
-
-def create_user(*, username: str, email: Optional[str], password_hash: str, role: Optional[str] = "user") -> User:
-    with get_session() as session:
-        user = User(username=username, email=email, password_hash=password_hash, role=role)
-        session.add(user)
-        session.flush()
-        session.refresh(user)
-        return user
-
-
-def get_user_by_username(username: str) -> Optional[User]:
-    with get_session() as session:
-        return session.query(User).filter(User.username == username).one_or_none()
-
-
-def get_user_by_email(email: str) -> Optional[User]:
-    with get_session() as session:
-        return session.query(User).filter(User.email == email).one_or_none()
+__all__ = [
+    "Base",
+    "DATABASE_URL",
+    "engine",
+    "SessionLocal",
+    "get_session",
+    "init_db",
+    "LessonPlan",
+    "User",
+    "Material",
+    "create_lesson_plan",
+    "list_lesson_plans",
+    "get_lesson_plan",
+    "create_material",
+    "list_materials",
+    "delete_material",
+    "create_user",
+    "get_user_by_username",
+    "get_user_by_email",
+]

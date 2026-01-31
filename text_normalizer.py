@@ -9,7 +9,25 @@ def normalize_ai_markdown(md: str) -> str:
           .replace("\xa0", " ")
     )
 
-    while "\n\n\n" in md:
-        md = md.replace("\n\n\n", "\n\n")
+    result = []
 
-    return md.strip()
+    for line in md.split("\n"):
+        stripped = line.strip()
+
+        # ❌ пустые пункты списков
+        if stripped in ("-", "*", "•"):
+            continue
+
+        # ❌ вложенные списки — запрещаем
+        if line.startswith(("  -", "  *", "\t-", "\t*")):
+            line = stripped  # разворачиваем в обычный список
+
+        result.append(line.lstrip())
+
+    text = "\n".join(result)
+
+    # ❌ больше двух пустых строк подряд
+    while "\n\n\n" in text:
+        text = text.replace("\n\n\n", "\n\n")
+
+    return text.strip()
