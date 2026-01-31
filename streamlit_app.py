@@ -374,72 +374,6 @@ def _markdown_to_html(markdown_text: str) -> str:
         return f"<p>{escaped}</p>"
 
 
-def _clean_editor_html(html_text: str) -> str:
-    """Удаляет пустые строки/абзацы из HTML Quill.
-
-    Quill представляет пустые строки как `<p><br></p>`.
-    Мы выкидываем такие блоки, а также пустые `<li>`.
-    """
-
-    raw = (html_text or "").strip()
-    if not raw:
-        return ""
-
-    try:
-        soup = BeautifulSoup(raw, "html.parser")
-    except Exception:
-        return raw
-
-    root = soup.body if soup.body else soup
-
-    def _is_effectively_empty(tag) -> bool:
-        # Если есть медиа/таблицы — не трогаем
-        if tag.find(["img", "video", "iframe", "table"], recursive=True):
-            return False
-
-        text = tag.get_text(" ", strip=True).replace("\xa0", "").strip()
-        if text:
-            return False
-
-        # Разрешаем только <br> и пустые контейнеры (например, <li><p><br></p></li>)
-        for child in tag.contents:
-            if isinstance(child, NavigableString):
-                if str(child).replace("\xa0", "").strip():
-                    return False
-                continue
-
-            child_name = (getattr(child, "name", None) or "").lower()
-            if child_name == "br":
-                continue
-            if child_name in {"p", "span", "div"} and _is_effectively_empty(child):
-                continue
-
-            return False
-        return True
-
-    # Несколько проходов, т.к. после удаления могут появиться новые пустые контейнеры
-    for _ in range(3):
-        removed_any = False
-        for tag in list(root.find_all(["p", "div", "li"], recursive=True)):
-            if _is_effectively_empty(tag):
-                tag.decompose()
-                removed_any = True
-
-        # Если после удаления остались пустые списки — убираем их тоже
-        for list_tag in list(root.find_all(["ul", "ol"], recursive=True)):
-            if not list_tag.find("li", recursive=True):
-                list_tag.decompose()
-                removed_any = True
-        if not removed_any:
-            break
-
-    if soup.body:
-        cleaned = soup.body.decode_contents()
-    else:
-        cleaned = str(soup)
-
-    return (cleaned or "").strip()
-
 
 def _normalize_html_for_change_detection(html_text: str) -> str:
     """Нормализует HTML для сравнения.
@@ -661,7 +595,7 @@ def _html_to_docx_bytes(html: str) -> bytes:
         for child in node.children:
             add_inline(paragraph, child, bold=bold, italic=italic)
 
-    soup = BeautifulSoup(_clean_editor_html(html or ""), "html.parser")
+    soup = BeautifulSoup((html or ""), "html.parser")
     doc = Document()
 
     body = soup.body if soup.body else soup
@@ -880,28 +814,15 @@ with col_editor:
             key=f"editor_quill_{st.session_state.get('editor_instance', 0)}",
         )
         if html_value is not None:
-            incoming_html = html_value
-            cleaned_html = _clean_editor_html(incoming_html)
-            st.session_state["editor_html"] = cleaned_html
-
-            # Если чистка изменила документ (кроме хвостового <p><br></p>),
-            # перерисуем Quill, чтобы пустые строки исчезли визуально.
-            before = _normalize_html_for_change_detection(incoming_html)
-            after = _normalize_html_for_change_detection(cleaned_html)
-            if before != after:
-                now = time.time()
-                last = st.session_state.get("_last_quill_remount_ts", 0.0)
-                if now - last >= 0.8:
-                    st.session_state["_last_quill_remount_ts"] = now
-                    st.session_state["editor_instance"] = st.session_state.get("editor_instance", 0) + 1
-                    safe_rerun()
+            # Сохраняем сырой HTML, без дополнительной серверной очистки или перерисовки редактора.
+            st.session_state["editor_html"] = html_value
 
         # Действия: сохранить, скачать .docx, очистить
         action_cols = st.columns([1, 1, 1])
         if action_cols[0].button("Сохранить в БД"):
             title = st.session_state.get("editor_title") or (st.session_state.get("gen_topic") or "План урока")
             try:
-                content_to_save = _clean_editor_html(st.session_state.get("editor_html", ""))
+                content_to_save = st.session_state.get("editor_html", "")
                 plan = create_lesson_plan(
                     title=title,
                     subject=subject,
@@ -918,7 +839,7 @@ with col_editor:
                 st.error(f"Ошибка сохранения: {e}")
 
         docx_title = st.session_state.get("editor_title") or (st.session_state.get("gen_topic") or "lesson_plan")
-        html_for_docx = _clean_editor_html(st.session_state.get("editor_html", ""))
+        html_for_docx = st.session_state.get("editor_html", "")
         docx_bytes = _html_to_docx_bytes(html_for_docx)
         action_cols[1].download_button(
             label="Скачать .docx",
