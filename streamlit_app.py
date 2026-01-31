@@ -396,6 +396,99 @@ def _normalize_html_for_change_detection(html_text: str) -> str:
     return s.strip()
 
 
+def _sanitize_html_for_quill(html_text: str) -> str:
+    """Подготовить HTML перед загрузкой в Quill.
+
+    Убираем межтеговые переводы строк/пробелы (например "</p>\n<p>") —
+    некоторые версии Quill некорректно их интерпретируют и вставляют
+    пустые параграфы между блоками. Также удаляем полностью пустые
+    параграфы вида `<p>\s*</p>`.
+    """
+    if not html_text:
+        return ""
+
+    # Убираем полностью пустые параграфы, содержащие только пробелы/nbsp/br
+    html = re.sub(r"<p>(?:\s|&nbsp;|<br\s*/?>)*</p>", "", html_text, flags=re.IGNORECASE)
+
+    # Убираем пробелы/переносы между соседними тегами: </p>\n<p> -> </p><p>
+    html = re.sub(r">\s+<", "><", html)
+
+    # Сжимаем повторяющиеся пустые абзацы (на всякий случай)
+    html = re.sub(r"(?:<p>\s*</p>\s*){2,}", "", html, flags=re.IGNORECASE)
+
+    # Нормализуем списки, если Markdown конвертировался в несколько <p> с маркерами
+    html = _normalize_lists_in_html(html)
+
+    return html.strip()
+
+
+def _normalize_lists_in_html(html_text: str) -> str:
+    """Преобразует последовательные <p>-строки с маркерами в корректные <ul>/<ol>.
+
+    Примеры входа, которые встречаются в генерации ИИ:
+      <p>- первый пункт</p>
+      <p>- второй пункт</p>
+
+    Эта функция объединит их в:
+      <ul><li>первый пункт</li><li>второй пункт</li></ul>
+    """
+    if not html_text:
+        return ""
+
+    soup = BeautifulSoup(html_text, "html.parser")
+    container = soup.body if soup.body else soup
+
+    children = list(container.children)
+    i = 0
+    while i < len(children):
+        node = children[i]
+        if getattr(node, "name", None) == "p":
+            text = node.get_text()
+            m = re.match(r"^\s*((\d+\.)|[-*•])\s+", text)
+            if m:
+                is_numbered = bool(m.group(2))
+
+                # Собираем последовательную группу p с маркерами
+                items = []
+                j = i
+                while j < len(children):
+                    nd = children[j]
+                    if getattr(nd, "name", None) != "p":
+                        break
+                    t = nd.get_text()
+                    mm = re.match(r"^\s*((\d+\.)|[-*•])\s+(.*)$", t)
+                    if not mm:
+                        break
+                    items.append(nd)
+                    j += 1
+
+                if items:
+                    list_tag = soup.new_tag("ol" if is_numbered else "ul")
+                    for pnode in items:
+                        li = soup.new_tag("li")
+                        # Получаем внутренний HTML и убираем ведущий маркер
+                        inner_html = "".join(str(c) for c in pnode.contents)
+                        inner_html = re.sub(r"^\s*(?:\d+\.\s+|[-*•]\s+)", "", inner_html, count=1)
+                        fragment = BeautifulSoup(inner_html, "html.parser")
+                        for c in fragment.contents:
+                            li.append(c)
+                        list_tag.append(li)
+
+                    # Заменяем первую ноду на сформированный список и удаляем остальные
+                    first = items[0]
+                    first.replace_with(list_tag)
+                    for k in items[1:]:
+                        k.extract()
+
+                    # Пересобираем children и продолжим после вставленного списка
+                    children = list(container.children)
+                    i += 1
+                    continue
+        i += 1
+
+    return str(soup)
+
+
 def _build_lesson_plan_messages(*, subject: str, grade: str, topic: str, lesson_type: str, class_level: str, notes: str) -> list:
     # Языковые особенности — добавляем инструкции, если предмет — белорусский или английский
     language_tail = ""
@@ -736,8 +829,9 @@ with col_form:
         else:
             plan_text = generate_lesson_plan_locally(subject, grade, topic, notes, class_level)
             st.session_state["editor_title"] = f"{subject or 'Урок'} — {topic}"[:200]
-            # Локальная генерация возвращает Markdown — конвертируем в HTML для визуального редактора.
-            st.session_state["editor_html"] = _markdown_to_html(_postprocess_plan_text(plan_text))
+            # Локальная генерация возвращает Markdown — прогоняем через normalize -> markdown_to_html
+            md = normalize_ai_markdown(_postprocess_plan_text(plan_text))
+            st.session_state["editor_html"] = markdown_to_html(md)
             st.session_state["editor_instance"] = st.session_state.get("editor_instance", 0) + 1
             st.success("✅ План сгенерирован и загружен в редактор справа. Отредактируйте текст и нажмите 'Сохранить в БД'.")
 
@@ -775,12 +869,8 @@ with col_editor:
                 full_text = generate_lesson_plan_locally(subject, grade, topic, notes, class_level)
 
             st.session_state["stream_buffer"] = full_text
-            # Единственное место, где ИИ влияет на содержимое редактора — нормализуем Markdown, конвертируем в HTML и загружаем.
-            raw_md = full_text
-            md = normalize_ai_markdown(raw_md)
-            html_value = markdown_to_html(md)
-            st.session_state["editor_html"] = html_value
-            st.session_state["editor_instance"] = st.session_state.get("editor_instance", 0) + 1
+            # Сохраняем сгенерированный Markdown отдельно — НЕ загружаем автоматически в редактор.
+            st.session_state["generated_content"] = full_text
             st.session_state["is_generating"] = False
 
         stream_buffer = st.session_state.get("stream_buffer", "")
@@ -789,37 +879,53 @@ with col_editor:
 
     if not st.session_state.get("is_generating"):
         # Если есть сгенерированный план (из предыдущего запуска), переместим его в editor_* перед созданием виджетов
-        if "generated_content" in st.session_state:
-            raw = st.session_state.pop("generated_content")
-            # Входной текст — Markdown от ИИ: нормализуем и конвертируем в HTML для редактора.
-            md = normalize_ai_markdown(raw)
-            st.session_state["editor_html"] = markdown_to_html(md)
-            st.session_state["editor_instance"] = st.session_state.get("editor_instance", 0) + 1
+        # Не загружаем автоматически `generated_content` — используем кнопку загрузки ниже.
         if "generated_title" in st.session_state:
             st.session_state["editor_title"] = st.session_state.pop("generated_title")
 
         # Инициализация содержимого редактора в session_state по умолчанию (делается один раз)
         if "editor_html" not in st.session_state:
-            st.session_state["editor_html"] = ""
-            st.session_state["editor_instance"] = 0
+            st.session_state.editor_html = ""
+            st.session_state.editor_instance = 0
         if "editor_title" not in st.session_state:
             st.session_state["editor_title"] = ""
 
         # Поле заголовка и сам редактор (WYSIWYG)
         st.text_input("Заголовок плана", key="editor_title")
 
+        # Кнопка: единственное место, где загружаем Markdown от ИИ в редактор (normalize -> markdown_to_html -> load)
+        if st.button("Загрузить текст от ИИ"):
+            ai_md = st.session_state.get("generated_content") or st.session_state.get("stream_buffer") or ""
+            if ai_md:
+                # Сначала прогоняем через postprocess, чтобы убрать обёртки, кодовые блоки
+                # и нормализовать отступы — это позволяет markdown->HTML правильно
+                # превращать заголовки (##, ###) в теги <h2>/<h3>.
+                ai_md = _postprocess_plan_text(ai_md)
+                md = normalize_ai_markdown(ai_md)
+                html_val = markdown_to_html(md)
+                # Сантехника: привести HTML к компактному виду, чтобы Quill не добавлял
+                # лишние пустые параграфы между блоками.
+                html_val = _sanitize_html_for_quill(html_val)
+                st.session_state.editor_html = html_val
+                st.session_state.editor_instance = st.session_state.get("editor_instance", 0) + 1
+            else:
+                st.warning("Нет сгенерированного текста для загрузки.")
+
         if st_quill is None:
             st.error("Визуальный редактор недоступен: пакет streamlit-quill не установлен.")
             st.stop()
 
         html_value = st_quill(
-            value=st.session_state.get("editor_html", ""),
+            value=st.session_state.editor_html,
             html=True,
-            key=f"editor_quill_{st.session_state.get('editor_instance', 0)}",
+            key=f"editor_{st.session_state['editor_instance']}",
         )
         if html_value is not None:
-            # Сохраняем сырой HTML, без дополнительной серверной очистки или перерисовки редактора.
-            st.session_state["editor_html"] = html_value
+            st.session_state.editor_html = html_value
+
+        # Отладка: показать реальный HTML, который сейчас в редакторе
+        with st.expander("HTML (что реально в редакторе)"):
+            st.code(st.session_state.editor_html, language="html")
 
         # Действия: сохранить, скачать .docx, очистить
         action_cols = st.columns([1, 1, 1])
