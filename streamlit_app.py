@@ -791,12 +791,12 @@ with col_editor:
         if "generated_title" in st.session_state:
             st.session_state["editor_title"] = st.session_state.pop("generated_title")
 
-        # Инициализация содержимого редактора в session_state по умолчанию
+        # Инициализация содержимого редактора в session_state по умолчанию (делается один раз)
+        if "editor_html" not in st.session_state:
+            st.session_state["editor_html"] = ""
+            st.session_state["editor_instance"] = 0
         if "editor_title" not in st.session_state:
             st.session_state["editor_title"] = ""
-
-        if "editor_instance" not in st.session_state:
-            st.session_state["editor_instance"] = 0
 
         # Поле заголовка и сам редактор (WYSIWYG)
         st.text_input("Заголовок плана", key="editor_title")
@@ -804,9 +804,6 @@ with col_editor:
         if st_quill is None:
             st.error("Визуальный редактор недоступен: пакет streamlit-quill не установлен.")
             st.stop()
-
-        if "editor_html" not in st.session_state:
-            st.session_state["editor_html"] = ""
 
         html_value = st_quill(
             value=st.session_state.get("editor_html", ""),
