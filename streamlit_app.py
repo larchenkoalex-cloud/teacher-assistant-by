@@ -100,6 +100,43 @@ GRADES = [f"{i} класс" for i in range(1, 12)]
 
 st.set_page_config(page_title="Teacher Assistant", layout="wide")
 
+# Уменьшаем левый отступ основного контейнера (чтобы сократить расстояние до сайдбара/колонки регистрации)
+# Значение уменьшено примерно вдвое относительно дефолтного.
+# Добавляем стиль для узкого окна потоковой генерации, чтобы оно было фиксировано по высоте
+# и не сдвигало остальные элементы страницы при поступлении новых строк.
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-left: 1rem !important;
+    }
+    .gen-stream-box {
+        width: 100% !important;
+        max-width: none !important;
+        height: 220px !important;
+        box-sizing: border-box !important;
+        overflow: auto;
+        border-radius: 6px;
+        padding: 0.6rem;
+        background: #fbfbfb;
+        border: 1px solid #e6e6e6;
+        box-shadow: none;
+        font-size: 0.95rem;
+        line-height: 1.4;
+        white-space: pre-wrap;
+        word-break: break-word;
+        margin: 0;
+        text-align: left;
+    }
+    .gen-stream-box pre {
+        margin: 0;
+        white-space: pre-wrap;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Инициализация БД (SQLite по умолчанию, можно заменить на Postgres через DATABASE_URL)
 init_db()
 
@@ -289,7 +326,12 @@ def stream_generate_chat_via_api(*, messages: list, headers: dict, placeholder, 
         return ""
 
     def _on_update(full_text: str) -> None:
-        placeholder.markdown(_postprocess_plan_text(full_text))
+        # Рендерим поток в фиксированном окне, чтобы не "прыгала" страница.
+        safe_text = html.escape(full_text or "")
+        placeholder.markdown(
+            f"<div class='gen-stream-box'><pre>{safe_text}</pre></div>",
+            unsafe_allow_html=True,
+        )
 
     try:
         return openrouter_client.stream_chat_completions(
@@ -603,12 +645,20 @@ def _html_to_docx_bytes(html: str) -> bytes:
 st.header("Генерация плана урока (ИИ)")
 
 # Разделяем экран: левая колонка — форма генерации, правая — редактор результата
-col_form, col_editor = st.columns([2, 3])
+# Уменьшаем левый отступ/ширину левой колонки вдвое (раньше было [2,3])
+col_form, col_editor = st.columns([1, 3])
 
 with col_form:
     grade = st.selectbox("Класс", GRADES, index=3, key="gen_grade")
     subject = st.selectbox("Предмет", SUBJECTS, index=0, key="gen_subject")
-    topic = st.text_input("Тема урока", placeholder="Десятичные дроби", help="Ключевая тема занятия", key="gen_topic")
+    topic = st.text_area(
+        "Тема урока",
+        value=st.session_state.get("gen_topic", ""),
+        placeholder="Десятичные дроби",
+        help="Ключевая тема занятия (можно в несколько строк)",
+        key="gen_topic",
+        height=50,
+    )
     # Тип урока — выбирает учитель
     lesson_type = st.selectbox(
         "Тип урока",
@@ -634,6 +684,8 @@ with col_form:
     # Редактируемый шаблон промпта (можно подправить перед генерацией)
     if "prompt_template" not in st.session_state:
         st.session_state["prompt_template"] = ""
+    # Кнопка генерации перемещена над шаблоном промпта по просьбе пользователя
+    generate_clicked = st.button("Сгенерировать план урока")
     with st.expander("Шаблон промпта (можно править)"):
         st.text_area("Шаблон промпта", key="prompt_template", height=200)
     model_choice = st.selectbox(
@@ -699,9 +751,6 @@ with col_form:
                     safe_rerun()
                     st.stop()
 
-    generate_clicked = st.button("Сгенерировать план урока")
-
-    if generate_clicked:
         if not subject or not topic:
             st.warning("Укажите хотя бы предмет и тему урока.")
         elif model_choice == "Deepseek API (через ключ)" and api_key:
@@ -736,11 +785,14 @@ with col_form:
             st.session_state["generated_headers"] = headers
             st.session_state["generated_messages"] = messages
             st.session_state["generated_model"] = "deepseek/deepseek-chat"
-            st.session_state["generated_title"] = f"{subject or 'Урок'} — {topic}"[:200]
+            # Формируем читаемый заголовок из первой строки темы (без переносов)
+            topic_title = (topic or "").splitlines()[0].strip() or (topic or "")
+            st.session_state["generated_title"] = f"{subject or 'Урок'} — {topic_title}"[:200]
         else:
             plan_text = generate_lesson_plan_locally(subject, grade, topic, notes, class_level)
             # Локальная генерация: сохраняем в предпросмотр (без загрузки в редактор)
-            st.session_state["generated_title"] = f"{subject or 'Урок'} — {topic}"[:200]
+            topic_title = (topic or "").splitlines()[0].strip() or (topic or "")
+            st.session_state["generated_title"] = f"{subject or 'Урок'} — {topic_title}"[:200]
             st.session_state["stream_buffer"] = plan_text
             st.session_state["generated_content"] = plan_text
 
@@ -761,11 +813,48 @@ with col_form:
             st.success("✅ План сгенерирован. Редактор скрыт — правьте текст через предпросмотр и AI-замену.")
 
 with col_editor:
-    st.subheader("Предпросмотр плана урока")
+    # Центрируем заголовок в своей колонке
+    st.markdown("<h3 style=\"text-align:center; margin-top:0.25rem; margin-bottom:0.5rem;\">Предпросмотр плана урока</h3>", unsafe_allow_html=True)
 
     # Оставляем только визуальный редактор (WYSIWYG), чтобы не отвлекать учителя Markdown-разметкой.
 
     stream_placeholder = st.empty()
+
+    # Инициализация полей предпросмотра, чтобы блок предпросмотра можно было
+    # отрендерить здесь сразу под заголовком (без зависимости от остальных блоков).
+    if "preview_src_view" not in st.session_state:
+        st.session_state["preview_src_view"] = ""
+    if "preview_res_view" not in st.session_state:
+        st.session_state["preview_res_view"] = ""
+    if "preview_rewrite_range" not in st.session_state:
+        st.session_state["preview_rewrite_range"] = None
+
+    # Показываем блок предварительного просмотра перед всеми управлениями
+    # По умолчанию свернут; разворачивается автоматически, если есть исходный
+    # или сгенерированный результат, либо если в буфере есть данные.
+    preview_has_content = bool(
+        (st.session_state.get("preview_src_view") or "").strip()
+        or (st.session_state.get("preview_res_view") or "").strip()
+        or isinstance(st.session_state.get("preview_fill_widgets"), dict)
+        or bool(st.session_state.get("preview_rewrite_result"))
+    )
+    with st.expander("Предварительный просмотр переделанного фрагмента", expanded=preview_has_content):
+        if (st.session_state.get("preview_src_view") or "").strip():
+            st.caption("Исходный фрагмент")
+            st.text_area(
+                "Исходный фрагмент",
+                height=90,
+                disabled=True,
+                key="preview_src_view",
+                label_visibility="collapsed",
+            )
+        st.caption("Результат (переделанный фрагмент)")
+        st.text_area(
+            "Результат",
+            height=140,
+            key="preview_res_view",
+            label_visibility="collapsed",
+        )
 
     # Редактор убран: работаем только с предпросмотром.
 
@@ -804,9 +893,13 @@ with col_editor:
 
         stream_buffer = st.session_state.get("stream_buffer", "")
         if stream_buffer:
-            # Во время генерации показываем потоковый Markdown.
-            stream_placeholder.markdown(_postprocess_plan_text(stream_buffer))
-
+            # Во время генерации показываем поток в фиксированном окне.
+            # (Если SSE недоступен и текст пришёл целиком, покажем его здесь.)
+            safe_text = html.escape(stream_buffer or "")
+            stream_placeholder.markdown(
+                f"<div class='gen-stream-box'><pre>{safe_text}</pre></div>",
+                unsafe_allow_html=True,
+            )
     if not st.session_state.get("is_generating"):
         # После генерации убираем потоковый Markdown, чтобы пользователь работал
         # только в Quill (иначе ПКМ будет открывать браузерное меню на обычном тексте страницы).
@@ -852,22 +945,9 @@ with col_editor:
             st.session_state["preview_res_view"] = ""
         if "preview_event_log" not in st.session_state:
             st.session_state["preview_event_log"] = []
-        with st.expander("Диагностика предпросмотра", expanded=False):
-            st.write(
-                {
-                    "generated_content_len": len(preview_md or ""),
-                    "preview_html_len": len(st.session_state.get("preview_html") or ""),
-                    "quill_component": "ok" if quill_editor is not None else "missing",
-                    "pending_action": st.session_state.get("preview_pending_action"),
-                    "request_uid": st.session_state.get("preview_request_uid"),
-                    "last_selected_text": st.session_state.get("preview_selected_text"),
-                }
-            )
-
-        with st.expander("Лог событий компонента (последние 10)", expanded=False):
-            logs = st.session_state.get("preview_event_log", [])
-            for e in logs[:10]:
-                st.write(e)
+        # Диагностика предпросмотра и лог событий скрыты в UI по запросу пользователя.
+        # Для отладки при необходимости можно временно вернуть expander'ы или добавить
+        # опцию в боковую панель (например, st.sidebar.checkbox("Показывать диагностику")).
 
         if preview_md and not (st.session_state.get("preview_html") or "").strip():
             # Попробуем один раз сгенерировать HTML предпросмотра из Markdown, чтобы
@@ -931,24 +1011,6 @@ with col_editor:
                 "_uid": time.time(),
             }
             # applyReplace будет отправлен в компонент в этом же прогоне.
-
-        with st.expander("Предварительный просмотр переделанного фрагмента", expanded=True):
-            if (st.session_state.get("preview_src_view") or "").strip():
-                st.caption("Исходный фрагмент")
-                st.text_area(
-                    "Исходный фрагмент",
-                    height=90,
-                    disabled=True,
-                    key="preview_src_view",
-                    label_visibility="collapsed",
-                )
-            st.caption("Результат (переделанный фрагмент)")
-            st.text_area(
-                "Результат",
-                height=140,
-                key="preview_res_view",
-                label_visibility="collapsed",
-            )
 
         if quill_editor is not None:
             evt_preview = quill_editor(
