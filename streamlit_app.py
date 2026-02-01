@@ -328,22 +328,6 @@ def _build_openrouter_headers(api_key: str) -> dict:
     return openrouter_client.build_headers(api_key)
 
 
-def _markdown_to_html(markdown_text: str) -> str:
-    """Конвертирует Markdown -> HTML для загрузки в Quill.
-
-    Если пакет `markdown` недоступен, делаем безопасный HTML из plain text.
-    """
-
-    text = (markdown_text or "").replace("\r\n", "\n")
-    try:
-        import markdown as _md
-
-        return _md.markdown(text)
-    except Exception:
-        escaped = html.escape(text)
-        escaped = escaped.replace("\n\n", "</p><p>").replace("\n", "<br>")
-        return f"<p>{escaped}</p>"
-
 
 
 def _normalize_html_for_change_detection(html_text: str) -> str:
@@ -363,166 +347,6 @@ def _normalize_html_for_change_detection(html_text: str) -> str:
     )
     s = re.sub(r"(?:<p>(?:\s|&nbsp;)*</p>\s*)+$", "", s, flags=re.IGNORECASE)
     return s.strip()
-
-
-def _sanitize_html_for_quill(html_text: str) -> str:
-    return quill_html_utils.sanitize_html_for_quill(html_text)
-
-
-def _normalize_lists_in_html(html_text: str) -> str:
-    return quill_html_utils.normalize_lists_in_html(html_text)
-
-
-def _replace_html_range_with_html(html_text: str, index: int, length: int, replacement_html: str) -> str:
-    """Replace a plain-text range [index:index+length) in the HTML with an HTML fragment.
-
-    This walks text nodes using BeautifulSoup, finds the nodes covering the requested
-    plain-text character range and substitutes them with the provided HTML fragment.
-    It's a best-effort approach designed to preserve surrounding tags and formatting.
-    """
-    if html_text is None:
-        html_text = ""
-    if not isinstance(html_text, str):
-        html_text = str(html_text)
-
-    soup = BeautifulSoup(html_text, "html.parser")
-    container = soup.body if soup.body else soup
-
-    # Collect all text nodes in document order with their start/end offsets
-    text_nodes = []
-    offset = 0
-    for node in container.descendants:
-        if isinstance(node, NavigableString):
-            txt = str(node)
-            if txt:
-                start = offset
-                end = offset + len(txt)
-                text_nodes.append({"node": node, "start": start, "end": end, "text": txt})
-                offset = end
-
-    # If no text nodes, just append the replacement to the container
-    if not text_nodes:
-        try:
-            frag = BeautifulSoup(replacement_html or "", "html.parser")
-            container.append(frag)
-            return str(soup)
-        except Exception:
-            return str(soup)
-
-    range_start = max(0, int(index))
-    range_end = min(offset, int(index + length))
-
-    # Find start and end nodes
-    start_info = None
-    end_info = None
-    for i, info in enumerate(text_nodes):
-        if start_info is None and info["end"] > range_start:
-            start_info = (i, info)
-        if info["end"] >= range_end:
-            end_info = (i, info)
-            break
-
-    if start_info is None or end_info is None:
-        # Range outside text content; append replacement at end
-        try:
-            frag = BeautifulSoup(replacement_html or "", "html.parser")
-            container.append(frag)
-            return str(soup)
-        except Exception:
-            return str(soup)
-
-    si, s_info = start_info
-    ei, e_info = end_info
-
-    s_node = s_info["node"]
-    e_node = e_info["node"]
-    s_txt = s_info["text"]
-    e_txt = e_info["text"]
-
-    s_off = range_start - s_info["start"]
-    e_off = range_end - e_info["start"]
-
-    # Build prefix/suffix
-    prefix = s_txt[:s_off]
-    suffix = e_txt[e_off:]
-
-    # Replace across nodes:
-    if s_node == e_node:
-        # Simple case: single node
-        try:
-            new_frag = BeautifulSoup(replacement_html or "", "html.parser")
-            # Replace text in the node with prefix + frag + suffix
-            new_nodes = []
-            if prefix:
-                new_nodes.append(NavigableString(prefix))
-            for child in new_frag.contents:
-                new_nodes.append(child)
-            if suffix:
-                new_nodes.append(NavigableString(suffix))
-
-            for new_n in reversed(new_nodes):
-                e_node.insert_after(new_n)
-            e_node.extract()
-            return str(soup)
-        except Exception:
-            return str(soup)
-    else:
-        # Multi-node replacement
-        try:
-            # Trim start node to prefix
-            s_node.replace_with(NavigableString(prefix))
-            # Trim end node to suffix but we'll insert suffix later
-            # Remove intermediate nodes between s_node and e_node
-            cur = s_node.next_element
-            nodes_to_remove = []
-            while cur and cur is not e_node:
-                next_cur = cur.next_element
-                try:
-                    if isinstance(cur, NavigableString):
-                        nodes_to_remove.append(cur)
-                    else:
-                        # also remove empty elements which became irrelevant
-                        pass
-                except Exception:
-                    pass
-                cur = next_cur
-
-            for n in nodes_to_remove:
-                try:
-                    n.extract()
-                except Exception:
-                    pass
-
-            # Now replace e_node with suffix
-            # Insert replacement fragment after the prefix node
-            prefix_node = None
-            # find the node that contains prefix (it was replaced by NavigableString(prefix))
-            for node in container.descendants:
-                if isinstance(node, NavigableString) and str(node) == prefix:
-                    prefix_node = node
-                    break
-
-            frag = BeautifulSoup(replacement_html or "", "html.parser")
-            insert_target = prefix_node if prefix_node is not None else container
-            for child in frag.contents:
-                insert_target.insert_after(child)
-                insert_target = child
-
-            # Insert suffix after the last inserted fragment
-            if suffix:
-                last_inserted = insert_target
-                last_inserted.insert_after(NavigableString(suffix))
-
-            # Finally remove the original end node
-            try:
-                e_node.extract()
-            except Exception:
-                pass
-
-            return str(soup)
-        except Exception:
-            return str(soup)
-
 
 def _build_lesson_plan_messages(*, subject: str, grade: str, topic: str, lesson_type: str, class_level: str, notes: str, extra_instructions: str = "") -> list:
     # Языковые особенности — добавляем инструкции, если предмет — белорусский или английский
@@ -855,6 +679,7 @@ with col_form:
                 if st.button(t, key=f"suggest_topic_{i}"):
                     st.session_state["gen_topic"] = t
                     safe_rerun()
+                    st.stop()
 
         # Подсказки конкретно из календарно-тематического планирования (KTP)
         try:
@@ -871,6 +696,7 @@ with col_form:
                     st.session_state["gen_topic"] = t
                     st.success("Тема взята из календарно‑тематического планирования.")
                     safe_rerun()
+                    st.stop()
 
     generate_clicked = st.button("Сгенерировать план урока")
 
@@ -975,7 +801,7 @@ with col_editor:
                 html_val = markdown_to_html(md)
                 # Сантехника: привести HTML к компактному виду, чтобы Quill не добавлял
                 # лишние пустые параграфы между блоками.
-                html_val = _sanitize_html_for_quill(html_val)
+                html_val = quill_html_utils.sanitize_html_for_quill(html_val)
                 st.session_state.editor_html = html_val
                 st.session_state.editor_instance = st.session_state.get("editor_instance", 0) + 1
             else:
@@ -986,10 +812,6 @@ with col_editor:
             st.session_state["quill_pending_replace"] = None
         if "quill_apply_replace" not in st.session_state:
             st.session_state["quill_apply_replace"] = None
-        if "quill_apply_replace_sent" not in st.session_state:
-            st.session_state["quill_apply_replace_sent"] = False
-        if "quill_apply_pending_id" not in st.session_state:
-            st.session_state["quill_apply_pending_id"] = None
 
         instr_key = "quill_ai_replace_instr"
         if instr_key not in st.session_state:
@@ -1002,11 +824,7 @@ with col_editor:
             st.checkbox("Автоматически заменять после ПКМ", key=auto_key)
             st.text_input("Инструкция для ИИ", key=instr_key)
 
-        # Если в прошлый прогон мы уже отправили applyReplace во фронт, то сейчас очищаем,
-        # чтобы замена не применялась повторно.
-        if st.session_state.get("quill_apply_replace_sent") and st.session_state.get("quill_apply_replace") is not None:
-            st.session_state["quill_apply_replace"] = None
-            st.session_state["quill_apply_replace_sent"] = False
+        # (Removed frontend apply-tracking flags and related cleanup.)
 
         # UI для подтверждения AI-замены после ПКМ
         pending = st.session_state.get("quill_pending_replace")
@@ -1043,12 +861,13 @@ with col_editor:
                             if not ai_text:
                                 st.error("Не удалось получить ответ от ИИ.")
                             else:
-                                st.session_state["quill_apply_replace"] = {
+                                # Делегируем применение замены фронтенду: сохраняем payload в session_state
+                                payload = {
                                     "id": int(pending.get("id") or 0),
                                     "range": pending.get("range") or {"index": 0, "length": 0},
                                     "text": ai_text,
                                 }
-                                st.session_state["quill_pending_replace"] = None
+                                # Запишем в историю изменений (по желанию сохраняем результат ИИ)
                                 hist = st.session_state.get("ai_edit_history", [])
                                 hist.insert(
                                     0,
@@ -1060,22 +879,26 @@ with col_editor:
                                     },
                                 )
                                 st.session_state["ai_edit_history"] = hist[:20]
+
+                                svr_log = st.session_state.get("quill_server_log", [])
+                                svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_delegated_to_frontend", "id": payload["id"]})
+                                st.session_state["quill_server_log"] = svr_log[:50]
+
+                                st.session_state["quill_pending_replace"] = payload
                                 safe_rerun()
+                                st.stop()
 
                 if c2.button("Отмена", key="quill_ai_replace_cancel"):
                     st.session_state["quill_pending_replace"] = None
                     safe_rerun()
+                    st.stop()
 
         if quill_editor is not None and not st.session_state.get("quill_component_failed"):
-            apply_replace_arg = None
-            if st.session_state.get("quill_apply_replace") is not None and not st.session_state.get("quill_apply_replace_sent"):
-                apply_replace_arg = st.session_state.get("quill_apply_replace")
-
             evt = quill_editor(
                 value=st.session_state.editor_html,
                 height=420,
                 placeholder="Введите текст...",
-                apply_replace=apply_replace_arg,
+                apply_replace=st.session_state.get("quill_apply_replace"),
                 key=f"editor_{st.session_state['editor_instance']}",
             )
 
@@ -1104,13 +927,7 @@ with col_editor:
             # Помечаем, что payload отправлен во фронт (ровно один раз)
             # Флаг отправки будем устанавливать только после получения контентного события
             # из фронтенда, чтобы избежать гонки и преждевременного сброса состояний.
-            if apply_replace_arg is not None:
-                svr_log = st.session_state.get("quill_server_log", [])
-                svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_sent", "id": apply_replace_arg.get("id") if isinstance(apply_replace_arg, dict) else None})
-                st.session_state["quill_server_log"] = svr_log[:50]
-                # Сохраним id ожидаемой замены, чтобы при получении следующего content
-                # понимать, что это твой применённый результат.
-                st.session_state["quill_apply_pending_id"] = apply_replace_arg.get("id") if isinstance(apply_replace_arg, dict) else None
+            # (Removed frontend apply-send tracking.)
 
             # Обработка событий из редактора
             if isinstance(evt, dict):
@@ -1123,15 +940,12 @@ with col_editor:
                         svr_log = st.session_state.get("quill_server_log", [])
                         svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "content_received", "html_len": len(html_value)})
                         st.session_state["quill_server_log"] = svr_log[:50]
-                        # Если была ожидаемая замена — отмечаем её как применённую и очищаем флаги
-                        pending_id = st.session_state.get("quill_apply_pending_id")
-                        if pending_id is not None:
-                            # Отмечаем, что замена применена и очищаем все соответствующие флаги
-                            st.session_state["quill_apply_replace_sent"] = False
+                        # Содержимое получено от компонента — обновляем HTML
+                        # После получения content очищаем флаг apply_replace
+                        try:
                             st.session_state["quill_apply_replace"] = None
-                            st.session_state["quill_apply_pending_id"] = None
-                            svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_applied", "id": pending_id})
-                            st.session_state["quill_server_log"] = svr_log[:50]
+                        except Exception:
+                            pass
                 elif evt.get("type") == "debug":
                     # Логируем отладочные сообщения от фронтенда компонента
                     dbg = st.session_state.get("quill_debug_log", [])
@@ -1142,161 +956,65 @@ with col_editor:
                         st.session_state["quill_debug_log"] = dbg[:50]
                     except Exception:
                         pass
-                elif evt.get("type") == "apply_ack":
-                    # Фронтенд подтвердил, что применил замену — считаем задачу выполненной.
-                    try:
-                        ack_id = evt.get("id")
-                        svr_log = st.session_state.get("quill_server_log", [])
-                        svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_ack_received", "id": ack_id})
-                        st.session_state["quill_server_log"] = svr_log[:50]
-                        # Отметим, что замена применена и очистим ожидающие поля
-                        st.session_state["quill_apply_replace"] = None
-                        st.session_state["quill_apply_replace_sent"] = True
-                        st.session_state["quill_apply_pending_id"] = None
-                        # Попробуем аккуратно перерисовать интерфейс, если серверная попытка не выполнилась
-                        try:
-                            svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_ack_triggers_rerun", "id": ack_id})
-                            st.session_state["quill_server_log"] = svr_log[:50]
-                            safe_rerun()
-                        except Exception:
-                            svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_ack_rerun_failed", "id": ack_id})
-                            st.session_state["quill_server_log"] = svr_log[:50]
-                    except Exception:
-                        pass
+                
                 elif evt.get("type") == "replace_request":
                     req = {
-                        "id": evt.get("id"),
+                        "id": int(evt.get("id") or 0),
                         "range": evt.get("range"),
                         "text": evt.get("text"),
                     }
 
-                    # По умолчанию делаем замену в 1 клик (после ПКМ).
-                    sel_text = (req.get("text") or "").strip()
+                    sel_text = (req["text"] or "").strip()
                     api_key = st.session_state.get("api_key") or os.getenv("OPENROUTER_API_KEY")
-                    can_auto = bool(st.session_state.get(auto_key)) and bool(api_key) and bool(sel_text) and len(sel_text) <= 4000
 
-                    if can_auto:
-                        prompt = (
-                            "Заменить фрагмент текста.\n"
-                            "Ответ дайте только новым текстом без дополнительного комментария.\n\n"
-                            f"Фрагмент:\n---\n{sel_text}\n---\n"
-                            f"Инструкция: {st.session_state[instr_key]}"
-                        )
-                        with st.spinner("Заменяю выделение через ИИ..."):
-                            resp = generate_with_deepseek(api_key, prompt)
-                        ai_text = None
-                        if isinstance(resp, dict):
-                            ai_text = resp.get("choices", [{}])[0].get("message", {}).get("content")
-                        ai_text = (ai_text or "").strip()
-                        if not ai_text:
-                            # Переходим в ручной режим
-                            st.session_state["quill_pending_replace"] = req
-                            safe_rerun()
-                        else:
-                            # Автоматически применяем замену сразу, без повторного ПКМ
-                            payload = {
-                                "id": int(req.get("id") or 0),
-                                "range": req.get("range") or {"index": 0, "length": 0},
-                                "text": ai_text,
-                            }
-                            # Попробуем применить замену серверно, чтобы не зависеть от race-флагов
-                            try:
-                                repl_html = _markdown_to_html(ai_text)
-                                new_html = _replace_html_range_with_html(
-                                    st.session_state.get("editor_html", ""),
-                                    int(payload["range"].get("index", 0)),
-                                    int(payload["range"].get("length", 0)),
-                                    repl_html,
-                                )
-                                # Сантехника: прогоняем нормализацию
-                                new_html = _sanitize_html_for_quill(new_html)
-                                new_html = _normalize_lists_in_html(new_html)
+                    can_auto = (
+                        bool(st.session_state.get(auto_key)) and
+                        bool(api_key) and
+                        bool(sel_text) and
+                        len(sel_text) <= 4000
+                    )
 
-                                st.session_state["editor_html"] = new_html
-                                # Логируем и сохраняем в историю
-                                hist = st.session_state.get("ai_edit_history", [])
-                                hist.insert(
-                                    0,
-                                    {
-                                        "time": datetime.utcnow().isoformat(),
-                                        "sel": sel_text,
-                                        "instr": st.session_state[instr_key],
-                                        "result": ai_text,
-                                    },
-                                )
-                                st.session_state["ai_edit_history"] = hist[:20]
-
-                                svr_log = st.session_state.get("quill_server_log", [])
-                                svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_server_applied", "id": payload["id"]})
-                                st.session_state["quill_server_log"] = svr_log[:50]
-
-                                # Очистим вспомогательные поля (замена применена сразу)
-                                st.session_state["quill_pending_replace"] = None
-                                st.session_state["quill_apply_last_payload"] = None
-                                st.session_state["quill_apply_pending_id"] = None
-                                st.session_state["quill_apply_queued_at"] = None
-                                st.session_state["quill_apply_retry_count"] = 0
-
-                                # Попробуем аккуратно перерисовать интерфейс, чтобы клиент увидел
-                                # обновлённый HTML сразу. Увеличиваем счётчик инстанса редактора,
-                                # чтобы компонент пересоздался и пропатчил новое содержимое.
-                                try:
-                                    st.session_state["editor_instance"] = st.session_state.get("editor_instance", 0) + 1
-                                except Exception:
-                                    pass
-
-                                # Покажем пользователю краткое уведомление в интерфейсе
-                                try:
-                                    st.success("ИИ: замена применена")
-                                except Exception:
-                                    pass
-
-                                # Инициируем безопасный rerun, чтобы Streamlit отправил новый
-                                # state во фронтенд. Это может слегка перерисовать UI, но
-                                # гарантирует, что редактор получит новое содержимое.
-                                try:
-                                    svr_log = st.session_state.get("quill_server_log", [])
-                                    svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_server_rerun_attempt", "id": payload["id"]})
-                                    st.session_state["quill_server_log"] = svr_log[:50]
-                                    safe_rerun()
-                                except Exception:
-                                    svr_log = st.session_state.get("quill_server_log", [])
-                                    svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_server_rerun_failed", "id": payload["id"]})
-                                    st.session_state["quill_server_log"] = svr_log[:50]
-
-                                st.session_state["quill_apply_server_applied"] = payload["id"]
-                            except Exception as e:
-                                # Если серверная вставка провалилась, откатываемся к старой модели (frontend apply)
-                                svr_log = st.session_state.get("quill_server_log", [])
-                                svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_server_error", "error": str(e)})
-                                st.session_state["quill_server_log"] = svr_log[:50]
-                                # Фолбек: отправим payload во фронтенд как прежде
-                                st.session_state["quill_apply_replace"] = payload
-                                st.session_state["quill_apply_last_payload"] = payload
-                                st.session_state["quill_apply_pending_id"] = payload["id"]
-                                st.session_state["quill_apply_queued_at"] = time.time()
-                                st.session_state["quill_apply_retry_count"] = 0
-                                st.session_state["quill_apply_replace_sent"] = False
-                                safe_rerun()
-                            hist.insert(
-                                0,
-                                {
-                                    "time": datetime.utcnow().isoformat(),
-                                    "sel": sel_text,
-                                    "instr": st.session_state[instr_key],
-                                    "result": ai_text,
-                                },
-                            )
-                            st.session_state["ai_edit_history"] = hist[:20]
-                            safe_rerun()
-                            # Логируем событие: поставили задачу на применение замены
-                            svr_log = st.session_state.get("quill_server_log", [])
-                            svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_queued", "id": int(req.get("id") or 0)})
-                            st.session_state["quill_server_log"] = svr_log[:50]
-                    else:
-                        # Нет ключа/слишком длинно/отключен авто-режим — покажем панель подтверждения.
+                    if not can_auto:
                         st.session_state["quill_pending_replace"] = req
                         safe_rerun()
+                        st.stop()
+
+                    prompt = (
+                        "Заменить фрагмент текста.\n"
+                        "Ответ дайте только новым текстом.\n\n"
+                        f"{sel_text}\n\n"
+                        f"Инструкция: {st.session_state[instr_key]}"
+                    )
+
+                    with st.spinner("ИИ переписывает выделение..."):
+                        resp = generate_with_deepseek(api_key, prompt)
+
+                    ai_text = None
+                    if isinstance(resp, dict):
+                        ai_text = resp.get("choices", [{}])[0].get("message", {}).get("content")
+
+                    ai_text = (ai_text or "").strip()
+
+                    if not ai_text:
+                        st.session_state["quill_pending_replace"] = req
+                        safe_rerun()
+                        st.stop()
+
+                    # 🔥 ЕДИНСТВЕННО ПРАВИЛЬНО — передаём payload для фронтенда через quill_apply_replace
+                    st.session_state["quill_apply_replace"] = {
+                        "id": req["id"],
+                        "range": req["range"],
+                        "text": ai_text,
+                    }
+
+                    # 🔁 Принудительно пересоздаём Quill, чтобы он применил `quill_apply_replace`
+                    try:
+                        st.session_state["editor_instance"] = st.session_state.get("editor_instance", 0) + 1
+                    except Exception:
+                        pass
+
+                    safe_rerun()
+                    st.stop()
             else:
                 # Если компонент вернул None или что-то неожиданное — считаем, что фронтенд не загрузился.
                 # Переключение на fallback делаем выше (evt is None). Здесь оставляем счётчик
@@ -1310,6 +1028,7 @@ with col_editor:
                     st.session_state["quill_server_log"] = svr_log[:50]
                     st.warning("Quill-компонент не отвечает — использую fallback (streamlit-quill).")
                     safe_rerun()
+                    st.stop()
         else:
             # Fallback: старый streamlit-quill (без выделения/ПКМ событий)
             if st_quill is None:
@@ -1341,34 +1060,7 @@ with col_editor:
             else:
                 st.write("Пока нет debug-сообщений от компонента.")
 
-        # Watchdog: перепроверим, не нужно ли повторно отправить applyReplace
-        pending_id = st.session_state.get("quill_apply_pending_id")
-        if pending_id is not None:
-            queued_at = st.session_state.get("quill_apply_queued_at") or 0
-            retry = st.session_state.get("quill_apply_retry_count", 0)
-            last_payload = st.session_state.get("quill_apply_last_payload")
-            elapsed = time.time() - (queued_at or 0)
-            # Ждём небольшую задержку (1s) — если ACK/контент не пришёл, пробуем ещё до 3 раз.
-            if last_payload and retry < 3 and elapsed > 1.0:
-                st.session_state["quill_apply_replace"] = last_payload
-                st.session_state["quill_apply_queued_at"] = time.time()
-                st.session_state["quill_apply_retry_count"] = retry + 1
-                svr_log = st.session_state.get("quill_server_log", [])
-                svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_retry", "id": pending_id, "attempt": retry + 1})
-                st.session_state["quill_server_log"] = svr_log[:50]
-                safe_rerun()
-            elif retry >= 3 and elapsed > 1.0:
-                # Даем пользователю ручной контроль: показываем панель подтверждения.
-                st.session_state["quill_pending_replace"] = {"id": pending_id, "text": last_payload.get("text") if last_payload else "", "range": last_payload.get("range") if last_payload else {"index": 0, "length": 0}}
-                # Очистим все вспомогательные поля
-                st.session_state["quill_apply_last_payload"] = None
-                st.session_state["quill_apply_pending_id"] = None
-                st.session_state["quill_apply_queued_at"] = None
-                st.session_state["quill_apply_retry_count"] = 0
-                svr_log = st.session_state.get("quill_server_log", [])
-                svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_failed_giveup", "id": pending_id})
-                st.session_state["quill_server_log"] = svr_log[:50]
-                safe_rerun()
+        # (Removed watchdog/retry logic for frontend applyReplace.)
 
         # Отладка: серверные события для процесса applyReplace
         svr_logs = st.session_state.get("quill_server_log", [])
@@ -1416,6 +1108,7 @@ with col_editor:
             st.session_state["editor_title"] = ""
             st.session_state["editor_instance"] = st.session_state.get("editor_instance", 0) + 1
             safe_rerun()
+            st.stop()
 
         # Примечание: раньше тут был режим «вставьте выделенный текст». Теперь основная замена
         # делается прямо в редакторе через ПКМ (см. блок выше).
@@ -1677,6 +1370,7 @@ elif app_mode == "Админ-панель":
                     st.session_state[key_text] = ""
                     st.session_state[key_pick] = True
                     safe_rerun()
+                    st.stop()
 
                 if st.button(f"Сохранить метаданные для {f.name}"):
                     from storage import create_material
@@ -1734,6 +1428,7 @@ elif app_mode == "Админ-панель":
                     delete_material(m.id)
                     st.success("Материал удалён.")
                     safe_rerun()
+                    st.stop()
 
                 st.markdown("---")
 
