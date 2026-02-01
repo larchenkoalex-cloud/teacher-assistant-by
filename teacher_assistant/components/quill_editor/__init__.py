@@ -21,6 +21,7 @@ def quill_editor(
     height: int = 420,
     key: Optional[str] = None,
     apply_replace: Optional[Dict[str, Any]] = None,
+  request_selection: Optional[Dict[str, Any]] = None,
     placeholder: str = "",
 ) -> Any:
     """Quill editor with context-menu selection events.
@@ -39,6 +40,11 @@ def quill_editor(
         height=height,
         placeholder=placeholder,
         applyReplace=apply_replace,
+        requestSelection=request_selection,
         key=key,
-        default={"type": "content", "html": value or ""},
+      # ВАЖНО: не возвращаем "фейковый" content по умолчанию.
+      # Иначе при rerun с applyReplace сервер может увидеть этот default-content,
+      # сбросить apply-флаг раньше времени и автозамена будет срабатывать
+      # только после следующего взаимодействия пользователя.
+      default={"type": "noop"},
     )

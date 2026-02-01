@@ -2,6 +2,7 @@ import os
 import re
 import html
 import time
+import uuid
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
@@ -715,6 +716,20 @@ with col_form:
                 extra_instructions=st.session_state.get("prompt_template", ""),
             )
 
+            # Начинаем новую генерацию — сбрасываем состояние предпросмотра и буферы
+            st.session_state["preview_apply_replace"] = None
+            st.session_state["preview_request_selection"] = None
+            st.session_state["preview_request_uid"] = None
+            st.session_state["preview_pending_action"] = None
+            st.session_state["preview_selected_range"] = None
+            st.session_state["preview_selected_text"] = ""
+            st.session_state["preview_rewrite_range"] = None
+            st.session_state["preview_rewrite_source"] = ""
+            st.session_state["preview_rewrite_result"] = ""
+            st.session_state["preview_src_view"] = ""
+            st.session_state["preview_res_view"] = ""
+            st.session_state["preview_fill_widgets"] = None
+
             st.session_state["is_generating"] = True
             st.session_state["start_stream_now"] = True
             st.session_state["stream_buffer"] = ""
@@ -724,19 +739,35 @@ with col_form:
             st.session_state["generated_title"] = f"{subject or 'Урок'} — {topic}"[:200]
         else:
             plan_text = generate_lesson_plan_locally(subject, grade, topic, notes, class_level)
-            st.session_state["editor_title"] = f"{subject or 'Урок'} — {topic}"[:200]
-            # Локальная генерация возвращает Markdown — прогоняем через normalize -> markdown_to_html
-            md = normalize_ai_markdown(_postprocess_plan_text(plan_text))
-            st.session_state["editor_html"] = markdown_to_html(md)
-            st.session_state["editor_instance"] = st.session_state.get("editor_instance", 0) + 1
-            st.success("✅ План сгенерирован и загружен в редактор справа. Отредактируйте текст и нажмите 'Сохранить в БД'.")
+            # Локальная генерация: сохраняем в предпросмотр (без загрузки в редактор)
+            st.session_state["generated_title"] = f"{subject or 'Урок'} — {topic}"[:200]
+            st.session_state["stream_buffer"] = plan_text
+            st.session_state["generated_content"] = plan_text
+
+            # Сброс состояния предпросмотра, чтобы старые фрагменты не оставались видимыми
+            st.session_state["preview_apply_replace"] = None
+            st.session_state["preview_request_selection"] = None
+            st.session_state["preview_request_uid"] = None
+            st.session_state["preview_pending_action"] = None
+            st.session_state["preview_selected_range"] = None
+            st.session_state["preview_selected_text"] = ""
+            st.session_state["preview_rewrite_range"] = None
+            st.session_state["preview_rewrite_source"] = ""
+            st.session_state["preview_rewrite_result"] = ""
+            st.session_state["preview_src_view"] = ""
+            st.session_state["preview_res_view"] = ""
+            st.session_state["preview_fill_widgets"] = None
+
+            st.success("✅ План сгенерирован. Редактор скрыт — правьте текст через предпросмотр и AI-замену.")
 
 with col_editor:
-    st.subheader("Редактор плана урока")
+    st.subheader("Предпросмотр плана урока")
 
     # Оставляем только визуальный редактор (WYSIWYG), чтобы не отвлекать учителя Markdown-разметкой.
 
     stream_placeholder = st.empty()
+
+    # Редактор убран: работаем только с предпросмотром.
 
     # Если идёт генерация — показываем потоковый предпросмотр.
     # ВАЖНО: после окончания стрима сразу переключаемся на Quill в этом же прогоне,
@@ -767,92 +798,228 @@ with col_editor:
             st.session_state["stream_buffer"] = full_text
             # Сохраняем сгенерированный Markdown отдельно — НЕ загружаем автоматически в редактор.
             st.session_state["generated_content"] = full_text
+            # Сброс предпросмотра (пересчитается в HTML на следующем прогоне)
+            st.session_state["preview_html"] = ""
             st.session_state["is_generating"] = False
 
         stream_buffer = st.session_state.get("stream_buffer", "")
         if stream_buffer:
+            # Во время генерации показываем потоковый Markdown.
             stream_placeholder.markdown(_postprocess_plan_text(stream_buffer))
 
     if not st.session_state.get("is_generating"):
-        # Если есть сгенерированный план (из предыдущего запуска), переместим его в editor_* перед созданием виджетов
-        # Не загружаем автоматически `generated_content` — используем кнопку загрузки ниже.
-        if "generated_title" in st.session_state:
-            st.session_state["editor_title"] = st.session_state.pop("generated_title")
+        # После генерации убираем потоковый Markdown, чтобы пользователь работал
+        # только в Quill (иначе ПКМ будет открывать браузерное меню на обычном тексте страницы).
+        stream_placeholder.empty()
 
-        # Инициализация содержимого редактора в session_state по умолчанию (делается один раз)
-        if "editor_html" not in st.session_state:
-            st.session_state.editor_html = ""
-            st.session_state.editor_instance = 0
-        if "editor_title" not in st.session_state:
-            st.session_state["editor_title"] = ""
+        # --- Интерактивный предпросмотр с ПКМ→AI замена (без "режима редактора")
+        preview_md = st.session_state.get("generated_content") or st.session_state.get("stream_buffer") or ""
+        if "preview_html" not in st.session_state:
+            st.session_state["preview_html"] = ""
+        if "preview_apply_replace" not in st.session_state:
+            st.session_state["preview_apply_replace"] = None
+        if "preview_request_selection" not in st.session_state:
+            st.session_state["preview_request_selection"] = None
+        if "preview_request_uid" not in st.session_state:
+            st.session_state["preview_request_uid"] = None
+        if "preview_pending_action" not in st.session_state:
+            st.session_state["preview_pending_action"] = None
+        if "preview_selected_range" not in st.session_state:
+            st.session_state["preview_selected_range"] = None
+        if "preview_selected_text" not in st.session_state:
+            st.session_state["preview_selected_text"] = ""
+        if "preview_rewrite_range" not in st.session_state:
+            st.session_state["preview_rewrite_range"] = None
+        if "preview_rewrite_source" not in st.session_state:
+            st.session_state["preview_rewrite_source"] = ""
+        if "preview_rewrite_result" not in st.session_state:
+            st.session_state["preview_rewrite_result"] = ""
+        # Виджеты предпросмотра (важно: при наличии key значение из `value=`
+        # применяется только при первом рендере, дальше живёт state виджета).
+        if "preview_src_view" not in st.session_state:
+            st.session_state["preview_src_view"] = ""
+        if "preview_fill_widgets" not in st.session_state:
+            st.session_state["preview_fill_widgets"] = None
 
-        # Поле заголовка и сам редактор (WYSIWYG)
-        st.text_input("Заголовок плана", key="editor_title")
+        # Если на прошлом прогоне мы сгенерировали новый фрагмент, то применяем его
+        # к ключам виджетов ДО их отрисовки.
+        pending_fill = st.session_state.get("preview_fill_widgets")
+        if isinstance(pending_fill, dict):
+            st.session_state["preview_src_view"] = pending_fill.get("src", "") or ""
+            st.session_state["preview_res_view"] = pending_fill.get("res", "") or ""
+            st.session_state["preview_fill_widgets"] = None
+        if "preview_res_view" not in st.session_state:
+            st.session_state["preview_res_view"] = ""
+        if "preview_event_log" not in st.session_state:
+            st.session_state["preview_event_log"] = []
+        with st.expander("Диагностика предпросмотра", expanded=False):
+            st.write(
+                {
+                    "generated_content_len": len(preview_md or ""),
+                    "preview_html_len": len(st.session_state.get("preview_html") or ""),
+                    "quill_component": "ok" if quill_editor is not None else "missing",
+                    "pending_action": st.session_state.get("preview_pending_action"),
+                    "request_uid": st.session_state.get("preview_request_uid"),
+                    "last_selected_text": st.session_state.get("preview_selected_text"),
+                }
+            )
 
-        # Кнопка: единственное место, где загружаем Markdown от ИИ в редактор (normalize -> markdown_to_html -> load)
-        if st.button("Загрузить текст от ИИ"):
-            ai_md = st.session_state.get("generated_content") or st.session_state.get("stream_buffer") or ""
-            if ai_md:
-                # Сначала прогоняем через postprocess, чтобы убрать обёртки, кодовые блоки
-                # и нормализовать отступы — это позволяет markdown->HTML правильно
-                # превращать заголовки (##, ###) в теги <h2>/<h3>.
-                ai_md = _postprocess_plan_text(ai_md)
-                md = normalize_ai_markdown(ai_md)
-                html_val = markdown_to_html(md)
-                # Сантехника: привести HTML к компактному виду, чтобы Quill не добавлял
-                # лишние пустые параграфы между блоками.
-                html_val = quill_html_utils.sanitize_html_for_quill(html_val)
-                st.session_state.editor_html = html_val
-                st.session_state.editor_instance = st.session_state.get("editor_instance", 0) + 1
+        with st.expander("Лог событий компонента (последние 10)", expanded=False):
+            logs = st.session_state.get("preview_event_log", [])
+            for e in logs[:10]:
+                st.write(e)
+
+        if preview_md and not (st.session_state.get("preview_html") or "").strip():
+            # Попробуем один раз сгенерировать HTML предпросмотра из Markdown, чтобы
+            # компоненту пришёл непустой `value` и он мог эмитировать событие content.
+            try:
+                md2 = normalize_ai_markdown(_postprocess_plan_text(preview_md))
+                st.session_state["preview_html"] = quill_html_utils.sanitize_html_for_quill(markdown_to_html(md2))
+            except Exception as e:
+                # Не фатально — записываем в лог для диагностики
+                logs = st.session_state.get("preview_event_log", [])
+                logs.insert(0, {"time": datetime.utcnow().isoformat(), "warning": f"preview_html generation failed: {e}"})
+                st.session_state["preview_event_log"] = logs[:200]
+
+        prev_instr_choice_key = "preview_ai_instr_choice"
+        prev_instr_custom_key = "preview_ai_instr_custom"
+        if prev_instr_choice_key not in st.session_state:
+            st.session_state[prev_instr_choice_key] = "Сократить и сделать яснее"
+        if prev_instr_custom_key not in st.session_state:
+            st.session_state[prev_instr_custom_key] = ""
+
+        INSTR_PRESETS = [
+            "Сократить и сделать яснее",
+            "Упростить для учеников",
+            "Сделать более официально",
+            "Сделать более разговорно",
+            "Исправить ошибки и улучшить стиль",
+            "Переформулировать без изменения смысла",
+            "Свой вариант...",
+        ]
+
+        def _current_instr() -> str:
+            choice = (st.session_state.get(prev_instr_choice_key) or "").strip()
+            if choice == "Свой вариант...":
+                return (st.session_state.get(prev_instr_custom_key) or "").strip()
+            return choice
+
+        st.markdown("**Выделение → Переделать → (посмотреть) → Заменить**")
+        st.selectbox("Инструкция для ИИ", INSTR_PRESETS, key=prev_instr_choice_key)
+        if st.session_state.get(prev_instr_choice_key) == "Свой вариант...":
+            st.text_input("Свой вариант инструкции", key=prev_instr_custom_key, placeholder="Например: сделай короче и добавь конкретику")
+
+        btn_col1, btn_col2 = st.columns([1, 1])
+        if btn_col1.button("Переделать выделенный фрагмент"):
+            instr = _current_instr()
+            if not instr:
+                st.warning("Введите инструкцию для ИИ.")
             else:
-                st.warning("Нет сгенерированного текста для загрузки.")
+                req_uid = uuid.uuid4().hex
+                st.session_state["preview_pending_action"] = "rewrite"
+                st.session_state["preview_request_uid"] = req_uid
+                st.session_state["preview_request_selection"] = {"_uid": req_uid}
+                # Без дополнительного rerun: текущий прогон дойдёт до компонента,
+                # и он получит requestSelection в этом же рендере.
 
-        # --- Визуальный редактор: предпочитаем наш Quill-компонент (даёт события выделения по ПКМ)
-        if "quill_pending_replace" not in st.session_state:
-            st.session_state["quill_pending_replace"] = None
-        if "quill_apply_replace" not in st.session_state:
-            st.session_state["quill_apply_replace"] = None
+        can_apply = bool(st.session_state.get("preview_rewrite_range")) and bool((st.session_state.get("preview_res_view") or "").strip())
+        if btn_col2.button("Заменить выделенный фрагмент", disabled=not can_apply):
+            replacement_text = (st.session_state.get("preview_res_view") or "").strip()
+            st.session_state["preview_apply_replace"] = {
+                "range": st.session_state.get("preview_rewrite_range"),
+                "text": replacement_text,
+                "_uid": time.time(),
+            }
+            # applyReplace будет отправлен в компонент в этом же прогоне.
 
-        instr_key = "quill_ai_replace_instr"
-        if instr_key not in st.session_state:
-            st.session_state[instr_key] = "Перепиши текст, сохрани смысл, улучшив ясность и сократив длину."
-        auto_key = "quill_ai_replace_auto"
-        if auto_key not in st.session_state:
-            st.session_state[auto_key] = True
+        with st.expander("Предварительный просмотр переделанного фрагмента", expanded=True):
+            if (st.session_state.get("preview_src_view") or "").strip():
+                st.caption("Исходный фрагмент")
+                st.text_area(
+                    "Исходный фрагмент",
+                    height=90,
+                    disabled=True,
+                    key="preview_src_view",
+                    label_visibility="collapsed",
+                )
+            st.caption("Результат (переделанный фрагмент)")
+            st.text_area(
+                "Результат",
+                height=140,
+                key="preview_res_view",
+                label_visibility="collapsed",
+            )
 
-        with st.expander("Настройки AI-замены выделения", expanded=False):
-            st.checkbox("Автоматически заменять после ПКМ", key=auto_key)
-            st.text_input("Инструкция для ИИ", key=instr_key)
+        if quill_editor is not None:
+            evt_preview = quill_editor(
+                value=st.session_state.get("preview_html") or "",
+                height=420,
+                placeholder="Сгенерируйте план — он появится здесь...",
+                apply_replace=st.session_state.get("preview_apply_replace"),
+                request_selection=st.session_state.get("preview_request_selection"),
+                key="preview_quill",
+            )
+        else:
+            evt_preview = None
+            if preview_md:
+                st.info("Компонент предпросмотра (Quill) недоступен. Проверьте установку/запуск приложения.")
 
-        # (Removed frontend apply-tracking flags and related cleanup.)
+        if isinstance(evt_preview, dict):
+            # Логируем приходящие события от компонента для диагностики
+            logs = st.session_state.get("preview_event_log", [])
+            logs.insert(0, {"time": datetime.utcnow().isoformat(), "evt": evt_preview})
+            st.session_state["preview_event_log"] = logs[:200]
+            evt_type = evt_preview.get("type")
+            if evt_type == "content":
+                html_value = evt_preview.get("html")
+                if html_value is not None:
+                    st.session_state["preview_html"] = html_value
+                    # Завершаем цикл apply, если он был
+                    if st.session_state.get("preview_apply_replace") is not None:
+                        st.session_state["preview_apply_replace"] = None
+                        # Не делаем принудительный rerun: событие content уже пришло на rerun.
+            elif evt_type == "selection":
+                # Ответ компонента на одноразовый запрос выделения.
+                # Важно: Streamlit компоненты возвращают "последнее значение" на каждом rerun,
+                # поэтому обрабатываем selection только если он соответствует текущему запросу.
+                req_uid = str(st.session_state.get("preview_request_uid") or "")
+                evt_uid = str(evt_preview.get("request_uid") or "")
+                if not req_uid or evt_uid != req_uid:
+                    # Событие не относится к текущему запросу — игнорируем, чтобы не зациклить rerun.
+                    pass
+                else:
+                    st.session_state["preview_request_selection"] = None
+                    st.session_state["preview_request_uid"] = None
 
-        # UI для подтверждения AI-замены после ПКМ
-        pending = st.session_state.get("quill_pending_replace")
-        if pending and isinstance(pending, dict):
-            with st.container(border=True):
-                st.subheader("ИИ-замена выделения")
-                st.caption("В редакторе выделите текст → ПКМ → 'Заменить на другой вариант (AI)'.")
-                st.text_area("Выделенный фрагмент", value=pending.get("text", ""), height=120, disabled=True)
-                st.text_input("Инструкция для ИИ", key=instr_key)
-                c1, c2 = st.columns([1, 1])
-                if c1.button("Сгенерировать и заменить", key="quill_ai_replace_apply"):
-                    api_key = st.session_state.get("api_key") or os.getenv("OPENROUTER_API_KEY")
-                    if not api_key:
-                        st.error("API ключ не найден. Укажите OpenRouter API key слева (sk-or-v1-...).")
-                    else:
-                        sel_text = (pending.get("text") or "").strip()
-                        if not sel_text:
+                    rng = evt_preview.get("range")
+                    txt = (evt_preview.get("text") or "")
+                    st.session_state["preview_selected_range"] = rng
+                    st.session_state["preview_selected_text"] = txt
+
+                    if st.session_state.get("preview_pending_action") == "rewrite":
+                        st.session_state["preview_pending_action"] = None
+                        sel_text = (txt or "").strip()
+                        instr = _current_instr()
+                        api_key = st.session_state.get("api_key") or os.getenv("OPENROUTER_API_KEY")
+
+                        if not api_key:
+                            st.error("API ключ не найден. Укажите OpenRouter API key слева (sk-or-v1-...).")
+                        elif not rng or not rng.get("length"):
+                            st.warning("Сначала выделите фрагмент в тексте.")
+                        elif not sel_text:
                             st.warning("Пустое выделение.")
                         elif len(sel_text) > 4000:
                             st.error("Фрагмент слишком длинный (макс 4000 символов). Разбейте на части.")
+                        elif not instr:
+                            st.warning("Введите инструкцию для ИИ.")
                         else:
                             prompt = (
-                                "Заменить фрагмент текста.\n"
-                                "Ответ дайте только новым текстом без дополнительного комментария.\n\n"
+                                "Переделай фрагмент текста согласно инструкции.\n"
+                                "Ответ дай только новым текстом без комментариев.\n\n"
                                 f"Фрагмент:\n---\n{sel_text}\n---\n"
-                                f"Инструкция: {st.session_state[instr_key]}"
+                                f"Инструкция: {instr}"
                             )
-                            with st.spinner("Отправляю запрос к ИИ..."):
+                            with st.spinner("ИИ переделывает выделение..."):
                                 resp = generate_with_deepseek(api_key, prompt)
                             ai_text = None
                             if isinstance(resp, dict):
@@ -861,223 +1028,31 @@ with col_editor:
                             if not ai_text:
                                 st.error("Не удалось получить ответ от ИИ.")
                             else:
-                                # Делегируем применение замены фронтенду: сохраняем payload в session_state
-                                payload = {
-                                    "id": int(pending.get("id") or 0),
-                                    "range": pending.get("range") or {"index": 0, "length": 0},
-                                    "text": ai_text,
-                                }
-                                # Запишем в историю изменений (по желанию сохраняем результат ИИ)
-                                hist = st.session_state.get("ai_edit_history", [])
-                                hist.insert(
-                                    0,
-                                    {
-                                        "time": datetime.utcnow().isoformat(),
-                                        "sel": sel_text,
-                                        "instr": st.session_state[instr_key],
-                                        "result": ai_text,
-                                    },
-                                )
-                                st.session_state["ai_edit_history"] = hist[:20]
+                                st.session_state["preview_rewrite_range"] = rng
+                                st.session_state["preview_rewrite_source"] = sel_text
+                                st.session_state["preview_rewrite_result"] = ai_text
+                                # Нельзя менять ключи виджетов после их отрисовки в этом же прогоне.
+                                # Поэтому кладём результат в буфер и делаем один rerun.
+                                st.session_state["preview_fill_widgets"] = {"src": sel_text, "res": ai_text}
 
-                                svr_log = st.session_state.get("quill_server_log", [])
-                                svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "apply_delegated_to_frontend", "id": payload["id"]})
-                                st.session_state["quill_server_log"] = svr_log[:50]
-
-                                st.session_state["quill_pending_replace"] = payload
                                 safe_rerun()
                                 st.stop()
 
-                if c2.button("Отмена", key="quill_ai_replace_cancel"):
-                    st.session_state["quill_pending_replace"] = None
-                    safe_rerun()
-                    st.stop()
-
-        if quill_editor is not None and not st.session_state.get("quill_component_failed"):
-            evt = quill_editor(
-                value=st.session_state.editor_html,
-                height=420,
-                placeholder="Введите текст...",
-                apply_replace=st.session_state.get("quill_apply_replace"),
-                key=f"editor_{st.session_state['editor_instance']}",
-            )
-
-            # Если компонент не загрузился в браузере, Streamlit часто возвращает None.
-            # В этом случае сразу переключаемся на fallback-редактор, чтобы приложение
-            # оставалось рабочим (вместо "Your app is having trouble loading...").
-            if evt is None:
-                st.session_state["quill_component_failed"] = True
-                svr_log = st.session_state.get("quill_server_log", [])
-                svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "component_failed_load"})
-                st.session_state["quill_server_log"] = svr_log[:50]
-                st.warning("Quill-компонент не загрузился — использую fallback (streamlit-quill).")
-                if st_quill is None:
-                    st.error("Визуальный редактор недоступен: пакет streamlit-quill не установлен.")
-                    st.stop()
-
-                html_value = st_quill(
-                    value=st.session_state.editor_html,
-                    html=True,
-                    key=f"editor_fallback_{st.session_state['editor_instance']}",
-                )
-                if html_value is not None:
-                    st.session_state.editor_html = html_value
-                evt = {"type": "content", "html": st.session_state.editor_html}
-
-            # Помечаем, что payload отправлен во фронт (ровно один раз)
-            # Флаг отправки будем устанавливать только после получения контентного события
-            # из фронтенда, чтобы избежать гонки и преждевременного сброса состояний.
-            # (Removed frontend apply-send tracking.)
-
-            # Обработка событий из редактора
-            if isinstance(evt, dict):
-                # Успешный ответ — сбрасываем null-счётчик
-                st.session_state["quill_null_cnt"] = 0
-                if evt.get("type") == "content":
-                    html_value = evt.get("html")
-                    if html_value is not None:
-                        st.session_state.editor_html = html_value
-                        svr_log = st.session_state.get("quill_server_log", [])
-                        svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "content_received", "html_len": len(html_value)})
-                        st.session_state["quill_server_log"] = svr_log[:50]
-                        # Содержимое получено от компонента — обновляем HTML
-                        # После получения content очищаем флаг apply_replace
-                        try:
-                            st.session_state["quill_apply_replace"] = None
-                        except Exception:
-                            pass
-                elif evt.get("type") == "debug":
-                    # Логируем отладочные сообщения от фронтенда компонента
-                    dbg = st.session_state.get("quill_debug_log", [])
-                    try:
-                        msg = evt.get("msg") or "debug"
-                        data = evt.get("data") or {}
-                        dbg.insert(0, {"time": datetime.utcnow().isoformat(), "msg": msg, "data": data})
-                        st.session_state["quill_debug_log"] = dbg[:50]
-                    except Exception:
-                        pass
-                
-                elif evt.get("type") == "replace_request":
-                    req = {
-                        "id": int(evt.get("id") or 0),
-                        "range": evt.get("range"),
-                        "text": evt.get("text"),
-                    }
-
-                    sel_text = (req["text"] or "").strip()
-                    api_key = st.session_state.get("api_key") or os.getenv("OPENROUTER_API_KEY")
-
-                    can_auto = (
-                        bool(st.session_state.get(auto_key)) and
-                        bool(api_key) and
-                        bool(sel_text) and
-                        len(sel_text) <= 4000
-                    )
-
-                    if not can_auto:
-                        st.session_state["quill_pending_replace"] = req
-                        safe_rerun()
-                        st.stop()
-
-                    prompt = (
-                        "Заменить фрагмент текста.\n"
-                        "Ответ дайте только новым текстом.\n\n"
-                        f"{sel_text}\n\n"
-                        f"Инструкция: {st.session_state[instr_key]}"
-                    )
-
-                    with st.spinner("ИИ переписывает выделение..."):
-                        resp = generate_with_deepseek(api_key, prompt)
-
-                    ai_text = None
-                    if isinstance(resp, dict):
-                        ai_text = resp.get("choices", [{}])[0].get("message", {}).get("content")
-
-                    ai_text = (ai_text or "").strip()
-
-                    if not ai_text:
-                        st.session_state["quill_pending_replace"] = req
-                        safe_rerun()
-                        st.stop()
-
-                    # 🔥 ЕДИНСТВЕННО ПРАВИЛЬНО — передаём payload для фронтенда через quill_apply_replace
-                    st.session_state["quill_apply_replace"] = {
-                        "id": req["id"],
-                        "range": req["range"],
-                        "text": ai_text,
-                    }
-
-                    # 🔁 Принудительно пересоздаём Quill, чтобы он применил `quill_apply_replace`
-                    try:
-                        st.session_state["editor_instance"] = st.session_state.get("editor_instance", 0) + 1
-                    except Exception:
-                        pass
-
-                    safe_rerun()
-                    st.stop()
-            else:
-                # Если компонент вернул None или что-то неожиданное — считаем, что фронтенд не загрузился.
-                # Переключение на fallback делаем выше (evt is None). Здесь оставляем счётчик
-                # на случай редких нестабильностей.
-                cnt = st.session_state.get("quill_null_cnt", 0) + 1
-                st.session_state["quill_null_cnt"] = cnt
-                if cnt >= 3:
-                    st.session_state["quill_component_failed"] = True
-                    svr_log = st.session_state.get("quill_server_log", [])
-                    svr_log.insert(0, {"time": datetime.utcnow().isoformat(), "event": "component_unresponsive"})
-                    st.session_state["quill_server_log"] = svr_log[:50]
-                    st.warning("Quill-компонент не отвечает — использую fallback (streamlit-quill).")
-                    safe_rerun()
-                    st.stop()
-        else:
-            # Fallback: старый streamlit-quill (без выделения/ПКМ событий)
-            if st_quill is None:
-                st.error("Визуальный редактор недоступен: пакет streamlit-quill не установлен.")
-                st.stop()
-
-            html_value = st_quill(
-                value=st.session_state.editor_html,
-                html=True,
-                key=f"editor_{st.session_state['editor_instance']}",
-            )
-            if html_value is not None:
-                st.session_state.editor_html = html_value
-
-        # Отладка: показать реальный HTML, который сейчас в редакторе
-        with st.expander("HTML (что реально в редакторе)"):
-            st.code(st.session_state.editor_html, language="html")
-
-        # Отладка: логи компонента Quill
-        dbg_logs = st.session_state.get("quill_debug_log", [])
-        with st.expander("Quill component debug (последние сообщения)"):
-            if dbg_logs:
-                for i, d in enumerate(dbg_logs[:20]):
-                    ts = d.get("time")
-                    msg = d.get("msg")
-                    data = d.get("data")
-                    st.markdown(f"**{i+1}. {msg}** — {ts}")
-                    st.json(data)
-            else:
-                st.write("Пока нет debug-сообщений от компонента.")
-
-        # (Removed watchdog/retry logic for frontend applyReplace.)
-
-        # Отладка: серверные события для процесса applyReplace
-        svr_logs = st.session_state.get("quill_server_log", [])
-        with st.expander("Quill server events (последние)"):
-            if svr_logs:
-                for i, s in enumerate(svr_logs[:20]):
-                    st.markdown(f"**{i+1}. {s.get('event')}** — {s.get('time')}")
-                    st.json({k: v for k, v in s.items() if k not in ['time']})
-            else:
-                st.write("Пока нет серверных событий для Quill.")
+        # Редакторные блоки (Quill/streamlit-quill и их отладка) удалены.
 
         # Действия: сохранить, скачать .docx, очистить
         action_cols = st.columns([1, 1, 1])
         if action_cols[0].button("Сохранить в БД"):
-            title = st.session_state.get("editor_title") or (st.session_state.get("gen_topic") or "План урока")
+            title = (
+                st.session_state.get("generated_title")
+                or (st.session_state.get("gen_topic") or "План урока")
+            )
             try:
-                content_to_save = st.session_state.get("editor_html", "")
+                content_to_save = st.session_state.get("preview_html", "") or ""
+                if not content_to_save:
+                    src_md = st.session_state.get("generated_content") or st.session_state.get("stream_buffer") or ""
+                    md = normalize_ai_markdown(_postprocess_plan_text(src_md))
+                    content_to_save = quill_html_utils.sanitize_html_for_quill(markdown_to_html(md))
                 plan = create_lesson_plan(
                     title=title,
                     subject=subject,
@@ -1093,8 +1068,15 @@ with col_editor:
             except Exception as e:
                 st.error(f"Ошибка сохранения: {e}")
 
-        docx_title = st.session_state.get("editor_title") or (st.session_state.get("gen_topic") or "lesson_plan")
-        html_for_docx = st.session_state.get("editor_html", "")
+        docx_title = (
+            st.session_state.get("generated_title")
+            or (st.session_state.get("gen_topic") or "lesson_plan")
+        )
+        html_for_docx = st.session_state.get("preview_html", "") or ""
+        if not html_for_docx:
+            src_md = st.session_state.get("generated_content") or st.session_state.get("stream_buffer") or ""
+            md = normalize_ai_markdown(_postprocess_plan_text(src_md))
+            html_for_docx = quill_html_utils.sanitize_html_for_quill(markdown_to_html(md))
         docx_bytes = _html_to_docx_bytes(html_for_docx)
         action_cols[1].download_button(
             label="Скачать .docx",
@@ -1104,9 +1086,10 @@ with col_editor:
         )
 
         if action_cols[2].button("Очистить"):
-            st.session_state["editor_html"] = ""
-            st.session_state["editor_title"] = ""
-            st.session_state["editor_instance"] = st.session_state.get("editor_instance", 0) + 1
+            st.session_state["generated_content"] = ""
+            st.session_state["stream_buffer"] = ""
+            st.session_state["preview_html"] = ""
+            st.session_state["preview_apply_replace"] = None
             safe_rerun()
             st.stop()
 
@@ -1151,7 +1134,7 @@ if app_mode == "Пользовательский режим":
     # ----- Вкладка: Конспект (текущая работа с планом) -----
     with tab_concept:
         st.subheader("Конспект: генерация и редактор")
-        st.markdown("Используйте форму слева для генерации плана урока и редактор справа для правок.")
+        st.markdown("Используйте форму слева для генерации плана урока и предпросмотр справа для правок через ПКМ-замену.")
         # Показываем быстрый список последних конспектов
         with st.expander("Последние конспекты (файлы .docx)"):
             docs = sorted(materials_dir.glob("*.docx"))[:10]
@@ -1175,11 +1158,17 @@ if app_mode == "Пользовательский режим":
         st.markdown("Если у вас уже есть сгенерированный план в редакторе, вы можете создать раздаточный файл (.docx) из текущего содержимого:")
 
         col1, col2 = st.columns([1, 1])
-        docx_title = _normalize_docx_filename(handout_topic or st.session_state.get("editor_title", "lesson_plan"))
+        docx_title = _normalize_docx_filename(handout_topic or st.session_state.get("generated_title") or "lesson_plan")
         if col1.button("Создать раздаточный материал из текущего плана"):
-            html_for_docx = st.session_state.get("editor_html", "")
+            html_for_docx = st.session_state.get("preview_html", "") or ""
             if not html_for_docx:
-                st.warning("Нет содержимого в редакторе. Сгенерируйте или загрузите текст из ИИ сначала.")
+                src_md = st.session_state.get("generated_content") or st.session_state.get("stream_buffer") or ""
+                if src_md:
+                    md = normalize_ai_markdown(_postprocess_plan_text(src_md))
+                    html_for_docx = quill_html_utils.sanitize_html_for_quill(markdown_to_html(md))
+
+            if not html_for_docx:
+                st.warning("Нет содержимого. Сначала сгенерируйте план урока.")
             else:
                 try:
                     bytes_docx = _html_to_docx_bytes(html_for_docx)

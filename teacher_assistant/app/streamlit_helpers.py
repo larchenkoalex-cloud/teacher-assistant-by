@@ -9,7 +9,7 @@ def safe_rerun() -> None:
     а если и это не работает — помечаем `st.session_state` и вызываем `st.stop()`.
     """
     try:
-        st.experimental_rerun()
+        st.rerun()
     except Exception:
         try:
             from streamlit.runtime.scriptrunner.script_runner import RerunException

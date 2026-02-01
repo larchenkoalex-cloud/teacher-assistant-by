@@ -27,46 +27,7 @@
         overflow: auto;
       }
 
-      .context-menu {
-        position: fixed;
-        z-index: 9999;
-        display: none;
-        min-width: 240px;
-        background: #111827;
-        border: 1px solid rgba(255, 255, 255, 0.15);
-        border-radius: 10px;
-        padding: 6px;
-        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-        color: #fff;
-      }
-
-      .context-menu button {
-        width: 100%;
-        appearance: none;
-        background: transparent;
-        border: 0;
-        color: #fff;
-        padding: 10px 10px;
-        text-align: left;
-        cursor: pointer;
-        font-size: 14px;
-        border-radius: 8px;
-      }
-
-      .context-menu button:hover {
-        background: rgba(255, 255, 255, 0.08);
-      }
-
-      .context-menu .hint {
-        margin: 6px 10px 8px 10px;
-        font-size: 12px;
-        color: rgba(255, 255, 255, 0.75);
-      }
-
-      .context-menu .disabled {
-        opacity: 0.5;
-        pointer-events: none;
-      }
+      /* custom context menu removed - use browser default context menu */
 
       .sr-only {
         position: absolute;
@@ -90,12 +51,7 @@
       <div id="editor"></div>
     </div>
 
-    <div id="menu" class="context-menu" role="menu" aria-label="Меню редактора">
-      <button id="replaceBtn" type="button" role="menuitem">
-        Заменить на другой вариант (AI)
-      </button>
-      <div class="hint" id="selectionHint">Выделите текст и нажмите ПКМ</div>
-    </div>
+    <!-- custom context menu removed -->
 
     <script>
       // Streamlit runtime is provided by vendor/streamlit-component-lib.js
@@ -110,23 +66,10 @@
       let quill = null;
       let lastHtml = "";
       let lastSelection = null;
-      let menuOpen = false;
-      let replaceRequestId = 0;
       let suppressEmit = false;
+      let lastSelectionRequestUid = null;
 
-      function hideMenu() {
-        const menu = document.getElementById("menu");
-        menu.style.display = "none";
-        menuOpen = false;
-      }
-
-      function showMenu(x, y) {
-        const menu = document.getElementById("menu");
-        menu.style.left = `${x}px`;
-        menu.style.top = `${y}px`;
-        menu.style.display = "block";
-        menuOpen = true;
-      }
+      // custom context menu removed; no show/hide functions
 
       function getSelectionSafe() {
         if (!quill) return null;
@@ -158,9 +101,12 @@
       }
 
       function emitDebug(msg, data) {
+        // ВАЖНО: Streamlit компонент может отправить только ОДНО значение за раз.
+        // Debug-сообщения через setComponentValue легко "перетирают" content-события,
+        // из-за чего замена видна только после следующего клика/ПКМ.
+        // Поэтому debug оставляем в консоль.
         try {
-          const payload = { type: "debug", msg: String(msg || ""), data: data || {} };
-          Streamlit.setComponentValue(payload);
+          console.debug("[quill_editor]", String(msg || ""), data || {});
         } catch (e) {
           // swallow
         }
@@ -168,38 +114,23 @@
 
       function applyReplace(payload) {
         if (!quill || !payload) return;
-        const { range, text } = payload;
-        if (!range || typeof range.index !== "number" || typeof range.length !== "number") {
-          emitDebug("apply_invalid_range", { payload });
-          return;
-        }
-        const insertText = String(text ?? "");
         try {
-          quill.focus();
-          quill.deleteText(range.index, range.length, "user");
-          quill.insertText(range.index, insertText, "user");
-          // После вставки выделяем новый текст, чтобы можно было сразу повторить замену.
-          quill.setSelection(range.index, insertText.length, "user");
-          lastSelection = { index: range.index, length: insertText.length };
-          emitDebug("apply_performed", { index: range.index, length: insertText.length, id: payload.id });
-          // Отправим ACK немедленно, чтобы сервер мог подтвердить применение раньше
-          // возможной отложенной отправки контента.
-          try {
-            Streamlit.setComponentValue({ type: "apply_ack", id: payload.id });
-            emitDebug("apply_ack_sent_inside_apply", { id: payload.id });
-          } catch (ackErr) {
-            emitDebug("apply_ack_error_inside_apply", { error: String(ackErr) });
-          }
-          // Отложенно отправим контент вне текущего стека вызовов, чтобы гарантировать
-          // его доставку клиенту сервера.
-          setTimeout(function () {
+          if (payload && payload.range && payload.text !== undefined) {
+            quill.deleteText(payload.range.index, payload.range.length, "user");
+            quill.insertText(payload.range.index, payload.text, "user");
+
+            // 🔥 ОБЯЗАТЕЛЬНО отправляем обновлённый HTML назад
             try {
-              emitContent();
-              emitDebug("apply_content_emitted_delayed", { id: payload.id });
+              Streamlit.setComponentValue({
+                type: "content",
+                html: quill.root.innerHTML,
+              });
             } catch (e) {
-              emitDebug("apply_content_emit_error", { error: String(e), id: payload.id });
+              emitDebug("apply_send_content_error", { error: String(e) });
             }
-          }, 50);
+          } else {
+            emitDebug("apply_invalid_payload", { payload });
+          }
         } catch (e) {
           emitDebug("apply_exception", { error: String(e), payload });
         }
@@ -243,66 +174,7 @@
           }, 0);
         });
 
-        // Не даём клику по меню увести фокус и сбросить выделение.
-        const menuEl = document.getElementById("menu");
-        menuEl.addEventListener("mousedown", function (e) {
-          e.preventDefault();
-        });
-
-        // Right-click handler
-        quill.root.addEventListener("contextmenu", function (evt) {
-          evt.preventDefault();
-          evt.stopPropagation();
-          // Попробуем получить выделение с фокусом.
-          const range = getSelectionSafe() || lastSelection;
-          if (range) lastSelection = range;
-
-          const btn = document.getElementById("replaceBtn");
-          const hint = document.getElementById("selectionHint");
-
-          if (!range || !range.length) {
-            btn.classList.add("disabled");
-            hint.textContent = "Выделите текст, затем ПКМ";
-          } else {
-            btn.classList.remove("disabled");
-            hint.textContent = `Выделено: ${Math.min(range.length, 120)} символов`;
-          }
-
-          showMenu(evt.clientX, evt.clientY);
-        });
-
-        document.addEventListener("click", function () {
-          if (menuOpen) hideMenu();
-        });
-
-        document.addEventListener("scroll", function () {
-          if (menuOpen) hideMenu();
-        });
-
-        document.addEventListener("keydown", function (evt) {
-          if (evt.key === "Escape" && menuOpen) hideMenu();
-        });
-
-        document.getElementById("replaceBtn").addEventListener("click", function (evt) {
-          // Клик по меню может увести фокус и обнулить текущее выделение.
-          // Поэтому используем сохранённый `lastSelection`.
-          if (evt) {
-            evt.preventDefault();
-            evt.stopPropagation();
-          }
-          const range = getSelectionSafe() || lastSelection;
-          if (!range || !range.length) return;
-
-          const text = selectionText(range);
-          replaceRequestId += 1;
-          Streamlit.setComponentValue({
-            type: "replace_request",
-            id: replaceRequestId,
-            range: { index: range.index, length: range.length },
-            text,
-          });
-          hideMenu();
-        });
+        // Custom context menu removed; normal browser context menu will be used.
       }
 
       function setEditorHeight(height) {
@@ -330,13 +202,10 @@
           try {
             quill.setContents([], "silent");
             quill.clipboard.dangerouslyPasteHTML(0, incomingHtml, "silent");
-            // Отправим краткую отладочную метрику в Streamlit
-            emitDebug("paste_success", { incomingLen: (incomingHtml || "").length, afterLen: quill.root.innerHTML.length });
           } catch (e) {
             // fallback (на всякий случай)
             try {
               quill.root.innerHTML = incomingHtml;
-              emitDebug("paste_fallback_success", { incomingLen: (incomingHtml || "").length, afterLen: quill.root.innerHTML.length });
             } catch (ee) {
               emitDebug("paste_error", { error: String(ee), incomingLen: (incomingHtml || "").length });
             }
@@ -351,20 +220,31 @@
         }
 
         if (data.applyReplace && typeof data.applyReplace === "object") {
-          emitDebug("apply_received", data.applyReplace);
           try {
             applyReplace(data.applyReplace);
-            emitDebug("apply_attempted", { id: data.applyReplace.id });
-            // Отправим немедленный ACK, чтобы сервер мог подтвердить применение даже
-            // если контентное сообщение придёт позже или будет отфильтровано.
-            try {
-              Streamlit.setComponentValue({ type: "apply_ack", id: data.applyReplace.id });
-              emitDebug("apply_ack_sent", { id: data.applyReplace.id });
-            } catch (ackErr) {
-              emitDebug("apply_ack_error", { error: String(ackErr) });
-            }
           } catch (e) {
             emitDebug("apply_error", { error: String(e), payload: data.applyReplace });
+          }
+        }
+
+        // One-shot selection request from Python (for button-driven UX)
+        if (data.requestSelection && typeof data.requestSelection === "object") {
+          const uidRaw = data.requestSelection._uid;
+          const uid = uidRaw === undefined || uidRaw === null ? "" : String(uidRaw);
+          if (uid && uid !== lastSelectionRequestUid) {
+            lastSelectionRequestUid = uid;
+            // Важно: пользователь нажимает кнопку вне iframe, из-за чего фокус может уйти.
+            // Берём сохранённое выделение в приоритете.
+            const range = lastSelection || getSelectionSafe();
+            if (range) lastSelection = range;
+            const text = range && range.length ? selectionText(range) : "";
+            Streamlit.setComponentValue({
+              type: "selection",
+              id: Date.now(),
+              request_uid: uid,
+              range: range ? { index: range.index, length: range.length } : null,
+              text,
+            });
           }
         }
 
