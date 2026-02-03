@@ -1246,19 +1246,45 @@ with col_editor:
             }
             # applyReplace будет отправлен в компонент в этом же прогоне.
 
-        if quill_editor is not None:
-            evt_preview = quill_editor(
+        # Cloud-escape hatch: если Quill/Custom Components ломают фронтенд,
+        # можно отключить компонент через Secrets/ENV: DISABLE_QUILL=1
+        disable_quill_env = (os.environ.get("DISABLE_QUILL") or "").strip().lower() in ("1", "true", "yes")
+        try:
+            disable_quill_secret_raw = (st.secrets.get("DISABLE_QUILL") or "")
+        except Exception:
+            disable_quill_secret_raw = ""
+        disable_quill_secret = str(disable_quill_secret_raw).strip().lower() in ("1", "true", "yes")
+        disable_quill = disable_quill_env or disable_quill_secret
+
+        evt_preview = None
+        if quill_editor is not None and not disable_quill:
+            try:
+                evt_preview = quill_editor(
+                    value=st.session_state.get("preview_html") or "",
+                    height=420,
+                    placeholder="Сгенерируйте план — он появится здесь...",
+                    apply_replace=st.session_state.get("preview_apply_replace"),
+                    request_selection=st.session_state.get("preview_request_selection"),
+                    key="preview_quill",
+                )
+            except Exception as _err:
+                st.warning("Компонент Quill вызвал ошибку — использую текстовый fallback.")
+                try:
+                    logs = st.session_state.get("preview_event_log", [])
+                    logs.insert(0, {"time": datetime.utcnow().isoformat(), "evt": f"quill_error: {_err!r}"})
+                    st.session_state["preview_event_log"] = logs[:200]
+                except Exception:
+                    pass
+        else:
+            if preview_md:
+                st.info("Компонент предпросмотра (Quill) отключён/недоступен. Используется текстовый fallback.")
+
+        if evt_preview is None:
+            st.text_area(
+                "preview_fallback",
                 value=st.session_state.get("preview_html") or "",
                 height=420,
-                placeholder="Сгенерируйте план — он появится здесь...",
-                apply_replace=st.session_state.get("preview_apply_replace"),
-                request_selection=st.session_state.get("preview_request_selection"),
-                key="preview_quill",
             )
-        else:
-            evt_preview = None
-            if preview_md:
-                st.info("Компонент предпросмотра (Quill) недоступен. Проверьте установку/запуск приложения.")
 
         # (экспандер перемещён выше, под селектбокс инструкций)
 

@@ -53,15 +53,18 @@
 
     <!-- custom context menu removed -->
 
-    <script>
-      // Streamlit runtime is provided by vendor/streamlit-component-lib.js
-
-      // Resolve Streamlit API.
-      function resolveStreamlit() {
-        return window.Streamlit || (window.streamlitComponentLib && window.streamlitComponentLib.Streamlit) || null;
+    <script type="module">
+      // Prefer the official Streamlit component runtime to stay compatible with Streamlit Cloud.
+      // If it can't be loaded (CSP/network), fall back to the bundled legacy runtime.
+      let Streamlit = null;
+      try {
+        const mod = await import("https://unpkg.com/streamlit-component-lib@2.0.0/dist/streamlit.js");
+        Streamlit = mod.Streamlit;
+        window.Streamlit = Streamlit;
+        window.streamlitComponentLib = { Streamlit };
+      } catch (e) {
+        Streamlit = window.Streamlit || (window.streamlitComponentLib && window.streamlitComponentLib.Streamlit) || null;
       }
-
-      let Streamlit = resolveStreamlit();
 
       let quill = null;
       let lastHtml = "";
@@ -261,11 +264,7 @@
         } catch (e) {}
       }
 
-      if (Streamlit) {
-        initStreamlitBindings();
-      } else {
-        console.error("Streamlit runtime not found. Did vendor/streamlit-component-lib.js load?");
-      }
+      initStreamlitBindings();
     </script>
   </body>
 </html>
