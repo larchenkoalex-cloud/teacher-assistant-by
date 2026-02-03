@@ -4,7 +4,7 @@ import html
 import time
 import uuid
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -48,34 +48,47 @@ except Exception:  # pragma: no cover
 
 
 def generate_with_deepseek(api_key: str, prompt: str, model: str = "deepseek/deepseek-chat") -> dict:
-    """Универсальная функция для запросов к DeepSeek через OpenRouter"""
-    try:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://teacher-assistant.streamlit.app",
-            "X-Title": "Teacher Assistant"
-        }
-        
-        data = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7,
-            "max_tokens": 2000
-        }
-        
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=60
-        )
-        
-        response.raise_for_status()
-        return response.json()
-        
-    except Exception as e:
-        return {"error": str(e), "choices": [{"message": {"content": f"Ошибка: {e}"}}]}
+    """Универсальная функция для запросов к DeepSeek через OpenRouter.
+
+    Добавлены простые повторы и увеличенный таймаут, чтобы снизить вероятность
+    ошибки Read timed out при временных неполадках сети или у сервиса.
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://teacher-assistant.streamlit.app",
+        "X-Title": "Teacher Assistant",
+    }
+
+    data = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+        "max_tokens": 2000,
+    }
+
+    timeouts = [60, 90, 120]
+    last_exc = None
+    for to in timeouts:
+        try:
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=to,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            last_exc = e
+            # лёгкая пауза перед следующей попыткой
+            try:
+                time.sleep(1 + (to // 30))
+            except Exception:
+                pass
+
+    # если не удалось получить ответ
+    return {"error": str(last_exc), "choices": [{"message": {"content": f"Ошибка: {last_exc}"}}]}
 
 
 IS_DEV_ADMIN = True  # в режиме разработки считаем текущего пользователя администратором
@@ -174,6 +187,19 @@ st.markdown(
         background-color: unset !important;
         color: unset !important;
     }
+
+    /* Увеличиваем шрифт в заголовках вкладок (st.tabs):
+       это именно подписи "Раздаточный материал" / "Конспект" / "Викторина" сверху. */
+    .stTabs button[role="tab"] {
+        font-size: 1.2rem !important;
+    }
+    .stTabs button[role="tab"] p,
+    .stTabs button[role="tab"] span,
+    .stTabs button[role="tab"] div {
+        font-size: 1.2rem !important;
+        font-weight: 700 !important;
+        line-height: 1.1 !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -182,7 +208,7 @@ st.markdown(
 # Инициализация БД (SQLite по умолчанию, можно заменить на Postgres через DATABASE_URL)
 init_db()
 
-st.title("Teacher Assistant — помощник для учителя")
+st.title("Твой ассистет — помощник для учителя")
 st.markdown("Используйте форму слева для генерации плана урока и предпросмотр справа для правок.")
 
 # Sidebar settings header
@@ -468,11 +494,21 @@ def is_admin() -> bool:
 
 
 def _slugify(value: str) -> str:
-    """Простая функция для генерации безопасного имени файла."""
+    """Генерация безопасного имени файла.
 
-    value = value.strip().lower().replace(" ", "_")
-    allowed = "abcdefghijklmnopqrstuvwxyz0123456789_-"
-    return "".join(ch for ch in value if ch in allowed)[:60] or "lesson_plan"
+    Важно: поддерживаем кириллицу (Windows/macOS/Linux это обычно позволяют),
+    иначе темы/предметы на русском превращаются в пустые строки.
+    """
+
+    s = (value or "").strip().lower()
+    # приводим пробелы/подчёркивания к дефисам
+    s = re.sub(r"[\s_]+", "-", s)
+    # разрешаем латиницу, цифры, дефис/подчёркивание и кириллицу
+    s = re.sub(r"[^0-9a-zа-яё\-_]+", "", s)
+    # схлопываем повторяющиеся разделители
+    s = re.sub(r"[-_]{2,}", "-", s)
+    s = s.strip("-_")
+    return (s[:80] if s else "material")
 
 
 
@@ -671,6 +707,37 @@ def _normalize_docx_filename(title: str) -> str:
     return f"{_slugify(safe)}.docx"
 
 
+def _normalize_material_filename(*, grade: str | None, kind: str, topic: str | None, ext: str = "docx") -> str:
+    """Имя файла по шаблону: класс-(план|раздатка|викторина)-тема.
+
+    Пример: "5-класс-план-десятичные-дроби.docx".
+    """
+    kind_map = {
+        "план": "план",
+        "конспект": "план",
+        "раздатка": "раздатка",
+        "раздаточный материал": "раздатка",
+        "викторина": "викторина",
+        "quiz": "викторина",
+    }
+    kind_norm = kind_map.get((kind or "").strip().lower(), (kind or "").strip().lower() or "план")
+
+    grade_part = (grade or "").strip()
+    grade_part = re.sub(r"\s+", "-", grade_part)
+
+    topic_part = (topic or "").strip()
+    topic_part = re.sub(r"\s+", "-", topic_part)
+
+    base = "-".join([p for p in [grade_part, kind_norm, topic_part] if p])
+    if not base:
+        base = kind_norm or "material"
+
+    safe = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_\- ]+", "", base).strip()
+    safe = safe[:120] if safe else "material"
+    ext = (ext or "docx").lstrip(".")
+    return f"{_slugify(safe)}.{ext}"
+
+
 def _html_to_docx_bytes(html: str) -> bytes:
     from docx import Document
 
@@ -737,6 +804,59 @@ def _html_to_docx_bytes(html: str) -> bytes:
                         add_inline(p, child)
             return
 
+        if name == "table":
+            # Собираем строки tr (включая thead/tbody)
+            rows = []
+            for tr in tag.find_all("tr", recursive=False):
+                rows.append(tr)
+            # Иногда таблица имеет thead/tbody
+            if not rows:
+                for section in tag.find_all(["thead", "tbody"], recursive=False):
+                    for tr in section.find_all("tr", recursive=False):
+                        rows.append(tr)
+
+            if not rows:
+                return
+
+            # Определим число колонок по максимуму
+            max_cols = 0
+            table_cells = []
+            for tr in rows:
+                cells = tr.find_all(["th", "td"], recursive=False)
+                table_cells.append(cells)
+                if len(cells) > max_cols:
+                    max_cols = len(cells)
+
+            if max_cols == 0:
+                return
+
+            doc_table = doc.add_table(rows=len(rows), cols=max_cols)
+            try:
+                doc_table.style = "Table Grid"
+            except Exception:
+                pass
+
+            for r_idx, cells in enumerate(table_cells):
+                for c_idx in range(max_cols):
+                    cell_tag = cells[c_idx] if c_idx < len(cells) else None
+                    cell = doc_table.cell(r_idx, c_idx)
+                    # Очистим параграф по умолчанию
+                    cell.text = ""
+                    p = cell.paragraphs[0]
+                    if cell_tag is None:
+                        continue
+                    # Если это заголовочная ячейка <th>, делаем текст полужирным
+                    is_header = (cell_tag.name or "").lower() == "th"
+                    for child in cell_tag.children:
+                        if getattr(child, "name", None) and child.name.lower() in {"ul", "ol"}:
+                            # вложенный список — добавим как обычный текст с переносами
+                            for li in child.find_all("li"):
+                                add_inline(p, li)
+                                p.add_run("\n")
+                        else:
+                            add_inline(p, child, bold=is_header)
+            return
+
         # неизвестный блок — пытаемся обработать детей
         for child in tag.children:
             if getattr(child, "name", None):
@@ -759,8 +879,21 @@ col_form, col_editor = st.columns([1, 3])
 
 with col_form:
     st.markdown("<h3 style=\"text-align:left; margin-top:0.25rem; margin-bottom:0.5rem;\">Генерация плана урока (ИИ)</h3>", unsafe_allow_html=True)
-    grade = st.selectbox("Класс", GRADES, index=3, key="gen_grade")
-    subject = st.selectbox("Предмет", SUBJECTS, index=0, key="gen_subject")
+    def _gen_meta_changed():
+        # При изменении верхних метаданных синхронизируем их с областью раздатки
+        try:
+            st.session_state["handout_subject"] = st.session_state.get("gen_subject") or SUBJECTS[0]
+            st.session_state["handout_grade"] = st.session_state.get("gen_grade") or GRADES[0]
+            # Тему синхронизируем только если поле пустое или совпадает со старой темой
+            st.session_state["handout_topic"] = st.session_state.get("gen_topic") or ""
+            # Пометим раздатку как требующую регенерации
+            st.session_state["handout_generated_md"] = ""
+            st.session_state["handout_prompt_autofill"] = True
+        except Exception:
+            pass
+
+    grade = st.selectbox("Класс", GRADES, index=3, key="gen_grade", on_change=_gen_meta_changed)
+    subject = st.selectbox("Предмет", SUBJECTS, index=0, key="gen_subject", on_change=_gen_meta_changed)
     topic = st.text_area(
         "Тема урока",
         value=st.session_state.get("gen_topic", ""),
@@ -768,6 +901,7 @@ with col_form:
         help="Ключевая тема занятия (можно в несколько строк)",
         key="gen_topic",
         height=50,
+        on_change=_gen_meta_changed,
     )
     # Тип урока — выбирает учитель
     lesson_type = st.selectbox(
@@ -1168,7 +1302,7 @@ with col_editor:
             except Exception as e:
                 # Не фатально — записываем в лог для диагностики
                 logs = st.session_state.get("preview_event_log", [])
-                logs.insert(0, {"time": datetime.utcnow().isoformat(), "warning": f"preview_html generation failed: {e}"})
+                logs.insert(0, {"time": datetime.now(timezone.utc).isoformat(), "warning": f"preview_html generation failed: {e}"})
                 st.session_state["preview_event_log"] = logs[:200]
 
         prev_instr_choice_key = "preview_ai_instr_choice"
@@ -1271,7 +1405,7 @@ with col_editor:
                 st.warning("Компонент Quill вызвал ошибку — использую текстовый fallback.")
                 try:
                     logs = st.session_state.get("preview_event_log", [])
-                    logs.insert(0, {"time": datetime.utcnow().isoformat(), "evt": f"quill_error: {_err!r}"})
+                    logs.insert(0, {"time": datetime.now(timezone.utc).isoformat(), "evt": f"quill_error: {_err!r}"})
                     st.session_state["preview_event_log"] = logs[:200]
                 except Exception:
                     pass
@@ -1291,7 +1425,7 @@ with col_editor:
         if isinstance(evt_preview, dict):
             # Логируем приходящие события от компонента для диагностики
             logs = st.session_state.get("preview_event_log", [])
-            logs.insert(0, {"time": datetime.utcnow().isoformat(), "evt": evt_preview})
+            logs.insert(0, {"time": datetime.now(timezone.utc).isoformat(), "evt": evt_preview})
             st.session_state["preview_event_log"] = logs[:200]
             evt_type = evt_preview.get("type")
             if evt_type == "content":
@@ -1412,7 +1546,12 @@ with col_editor:
             action_cols[1].download_button(
                 label="Скачать .docx",
                 data=docx_bytes,
-                file_name=_normalize_docx_filename(docx_title),
+                file_name=_normalize_material_filename(
+                    grade=st.session_state.get("gen_grade"),
+                    kind="план",
+                    topic=st.session_state.get("gen_topic") or docx_title,
+                    ext="docx",
+                ),
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 on_click="ignore",
             )
@@ -1473,9 +1612,9 @@ if show_recent_plans:
             st.info("Пока нет сохранённых планов. Сгенерируйте первый план слева.")
 
 if app_mode == "Пользовательский режим":
-    st.header("Рабочее пространство учителя")
+    st.header("Дополнительный материал для урока")
 
-    tab_concept, tab_handout, tab_quiz = st.tabs(["Конспект", "Раздаточный материал", "Викторина"])
+    tab_handout, tab_concept, tab_quiz = st.tabs(["Раздаточный материал", "Конспект", "Викторина"])
 
     # ----- Вкладка: Конспект (текущая работа с планом) -----
     with tab_concept:
@@ -1493,99 +1632,612 @@ if app_mode == "Пользовательский режим":
     # ----- Вкладка: Раздаточный материал -----
     with tab_handout:
         st.subheader("Создать раздаточный материал")
-        st.markdown("Тема автоматически подставляется из поля 'Тема урока' слева, если оно заполнено.")
+        
 
-        handout_subject = st.selectbox("Предмет", SUBJECTS, index=SUBJECTS.index(st.session_state.get('gen_subject', SUBJECTS[0])) if st.session_state.get('gen_subject') in SUBJECTS else 0)
-        handout_grade = st.selectbox("Класс", GRADES, index=GRADES.index(st.session_state.get('gen_grade', GRADES[0])) if st.session_state.get('gen_grade') in GRADES else 0)
-        handout_topic = st.text_input("Тема раздаточного материала", value=st.session_state.get("gen_topic", ""))
-        handout_notes = st.text_area("Примечания (опционально)")
+        # Разметим форму в две равные колонки и распределим элементы поровну.
+        col_left, col_right = st.columns(2)
 
-        st.markdown("---")
-        st.markdown("Если у вас уже есть сгенерированный план в редакторе, вы можете создать раздаточный файл (.docx) из текущего содержимого:")
+        # Обработчик, который срабатывает при изменении входных параметров раздатки.
+        def _handout_inputs_changed():
+            st.session_state["handout_generated_md"] = ""
+            st.session_state["handout_prompt_autofill"] = True
 
-        col1, col2 = st.columns([1, 1])
-        docx_title = _normalize_docx_filename(handout_topic or st.session_state.get("generated_title") or "lesson_plan")
-        if col1.button("Создать раздаточный материал из текущего плана"):
-            html_for_docx = st.session_state.get("preview_html", "") or ""
-            if not html_for_docx:
-                src_md = st.session_state.get("generated_content") or st.session_state.get("stream_buffer") or ""
-                if src_md:
-                    md = normalize_ai_markdown(_postprocess_plan_text(src_md))
-                    html_for_docx = quill_html_utils.sanitize_html_for_quill(markdown_to_html(md))
+        # Синхронизируем предмет/класс/тему с верхними полями, чтобы не оставалось старых значений.
+        gen_sub = st.session_state.get("gen_subject")
+        gen_gr = st.session_state.get("gen_grade")
+        gen_top = (st.session_state.get("gen_topic") or "").strip()
 
-            if not html_for_docx:
-                st.warning("Нет содержимого. Сначала сгенерируйте план урока.")
+        if gen_sub:
+            st.session_state["handout_subject"] = gen_sub
+        else:
+            st.session_state["handout_subject"] = st.session_state.get("handout_subject") or SUBJECTS[0]
+
+        if gen_gr:
+            st.session_state["handout_grade"] = gen_gr
+        else:
+            st.session_state["handout_grade"] = st.session_state.get("handout_grade") or GRADES[0]
+
+        # Если тема изменилась — обновляем и сбрасываем ранее сгенерированный материал
+        prev_handout_topic = (st.session_state.get("handout_topic") or "").strip()
+        if gen_top != prev_handout_topic:
+            st.session_state["handout_topic"] = gen_top
+            st.session_state["handout_generated_md"] = ""
+            st.session_state["handout_prompt_autofill"] = True
+
+        handout_subject = st.session_state.get("handout_subject")
+        handout_grade = st.session_state.get("handout_grade")
+        handout_topic = st.session_state.get("handout_topic")
+
+        # Левый столбец: краткая информация, формат и длительность, дополнительные элементы
+        with col_left:
+            st.caption(f"Используем: {handout_subject} • {handout_grade} • Тема: {handout_topic or '—'}")
+
+            handout_kind = st.selectbox(
+                "Формат материала",
+                ["карточки-задания", "рабочий лист", "опорный конспект", "таблица", "схема", "квест"],
+                index=1,
+                key="handout_kind",
+                on_change=_handout_inputs_changed,
+            )
+
+            handout_duration = st.selectbox(
+                "Длительность",
+                ["15 минут","1 урок"],
+                index=0,
+                key="handout_duration",
+                on_change=_handout_inputs_changed,
+            )
+
+            handout_elements = st.multiselect(
+                "Задания должны включать",
+                [
+                    "теорию в рамочках",
+                    "примеры",
+                    "проблемные вопросы",
+                    "тесты с выбором ответа",
+                ],
+                default=[],
+                key="handout_elements",
+                on_change=_handout_inputs_changed,
+            )
+
+        # Правый столбец: режим работы, сложность и поле заметок
+        with col_right:
+            handout_work_mode = st.selectbox(
+                "Формат работы",
+                ["индивидуальная работа", "парная работа", "групповая работа"],
+                index=0,
+                key="handout_work_mode",
+                on_change=_handout_inputs_changed,
+            )
+
+            handout_difficulty = st.selectbox(
+                "Уровень сложности",
+                ["★ Базовый", "★★ Средний", "★★★ Повышенный"],
+                index=1,
+                key="handout_difficulty",
+                on_change=_handout_inputs_changed,
+            )
+
+            handout_notes = st.text_area("Примечания (опционально)", key="handout_notes", on_change=_handout_inputs_changed)
+
+        if "handout_prompt" not in st.session_state:
+            st.session_state["handout_prompt"] = ""
+
+        # Streamlit-нюанс: если у виджета задан key, параметр `value=`
+        # применяется только при первом рендере. Поэтому держим флаг,
+        # можно ли автообновлять промпт при смене селектов.
+        if "handout_prompt_autofill" not in st.session_state:
+            st.session_state["handout_prompt_autofill"] = True
+
+        def _handout_prompt_mark_dirty() -> None:
+            st.session_state["handout_prompt_autofill"] = False
+
+        if "handout_generated_md" not in st.session_state:
+            st.session_state["handout_generated_md"] = ""
+
+        auto_prompt = (
+            "Ты — опытный учитель-методист. Сгенерируй раздаточный материал ДЛЯ УЧЕНИКА по заданным параметрам.\n"
+            "Вывод: строго в Markdown (без HTML), чтобы можно было сохранить в .docx.\n\n"
+            f"Предмет: {handout_subject}.\n"
+            f"Класс: {handout_grade}.\n"
+            f"Тема: {handout_topic}.\n\n"
+            f"Формат материала: {handout_kind}.\n"
+            f"Формат работы: {handout_work_mode}.\n"
+            f"Длительность: {handout_duration}.\n"
+            f"Уровень сложности: {handout_difficulty}.\n\n"
+            "Общие требования:\n"
+            "- Структура: Заголовок → Краткая цель (1–2 строки) → Теория (если нужна) → Задания → Самопроверка (по желанию).\n"
+            "- Язык и объём: соответствуй классу и длительности; без воды.\n"
+            "- Форматирование: используй списки, таблицы (если уместно), разделители.\n"
+            "- Для 'карточки-задания' сделай 4–8 карточек с короткими заданиями.\n"
+            "- Для 'рабочий лист' сделай последовательный лист с полями для ответа (подчёркивания/пустые строки).\n"
+            "- Для 'опорный конспект' сделай краткие пункты + ключевые определения/формулы + 1–2 примера.\n"
+            "- Для 'таблица' дай таблицу для заполнения + 3–6 вопросов к ней.\n"
+            "- Для 'схема' дай схему в виде иерархического списка/блоков + вопросы.\n"
+            "- Для 'квест' сделай 5–8 шагов с подсказками и итоговым заданием.\n"
+            "- Если есть тесты с выбором ответа: 4 варианта (A–D) и в конце добавь небольшой 'Ключ ответов'.\n"
+            "- Не пиши рассуждений, только готовый материал.\n"
+        )
+        if handout_elements:
+            auto_prompt += "\nЗадания обязательно должны включать: " + ", ".join(handout_elements) + ".\n"
+        if (handout_notes or "").strip():
+            auto_prompt += f"\nДополнительные пожелания учителя:\n{handout_notes.strip()}\n"
+
+        # Если пользователь не правил промпт вручную, синхронизируем редактор с авто-промптом.
+        if st.session_state.get("handout_prompt_autofill"):
+            st.session_state["handout_prompt_editor"] = auto_prompt
+
+        with st.expander("Шаблон для генерации (можно править)", expanded=False):
+            st.caption("Можно оставить как есть — он собран автоматически из формы выше.")
+            prompt_cols = st.columns([1, 1, 3])
+            if prompt_cols[0].button("Сбросить к авто", key="handout_prompt_reset_btn"):
+                st.session_state["handout_prompt_autofill"] = True
+                st.session_state["handout_prompt_editor"] = auto_prompt
+
+            st.session_state["handout_prompt"] = st.text_area(
+                "Промпт",
+                height=220,
+                key="handout_prompt_editor",
+                on_change=_handout_prompt_mark_dirty,
+            )
+
+        gen_cols = st.columns([1, 1, 2])
+        if gen_cols[0].button("Сгенерировать раздаточный материал (ИИ)", key="handout_generate_btn"):
+            api_key_local = st.session_state.get("api_key") or os.getenv("OPENROUTER_API_KEY")
+            if not api_key_local:
+                st.error("Укажите OpenRouter API key в сайдбаре (sk-or-v1-...).")
+            elif not (handout_topic or "").strip():
+                st.warning("Заполните тему раздаточного материала.")
             else:
-                        try:
-                            bytes_docx = _html_to_docx_bytes(html_for_docx)
-                            save_path = materials_dir / docx_title
-                            with open(save_path, "wb") as fh:
-                                fh.write(bytes_docx)
+                prompt_text = (st.session_state.get("handout_prompt_editor") or auto_prompt).strip()
+                with st.spinner("Генерирую раздатку..."):
+                    resp = generate_with_deepseek(api_key_local, prompt_text)
+                md_text = (
+                    resp.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+                st.session_state["handout_generated_md"] = (md_text or "").strip()
 
-                            from storage import create_material
+        if gen_cols[1].button("Очистить", key="handout_clear_btn"):
+            st.session_state["handout_generated_md"] = ""
 
-                            topics_csv = (handout_topic or "").strip() or None
-                            user_id = st.session_state.get('user_id')
-                            create_material(
-                                filename=docx_title,
-                                uploader_id=user_id,
-                                topics=topics_csv,
-                                path=str(save_path),
-                                subject=handout_subject,
-                                grade=handout_grade,
-                            )
-                            st.success(f"Раздаточный материал создан и сохранён: {docx_title}")
-                            try:
-                                st.download_button(
-                                    "Скачать .docx",
-                                    data=bytes_docx,
-                                    file_name=docx_title,
-                                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                    on_click="ignore",
-                                )
-                            except KeyError as ke:
-                                logging.exception("Missing media key when creating download button")
-                                st.error("Файл временно недоступен. Пожалуйста, перезагрузите страницу и повторите попытку.")
-                            except Exception as e:
-                                logging.exception("Error while preparing download button")
-                                st.error("Не удалось подготовить файл для скачивания. Попробуйте ещё раз.")
-                        except Exception as e:
-                            logging.exception("Error while creating docx file for handout")
-                            st.error(f"Ошибка при создании раздатки: {e}")
+        if (st.session_state.get("handout_generated_md") or "").strip():
+            st.markdown("### Результат (можно править)")
+            st.session_state["handout_generated_md"] = st.text_area(
+                "handout_generated_md_editor",
+                value=st.session_state["handout_generated_md"],
+                height=320,
+                label_visibility="collapsed",
+            )
 
-        if col2.button("Предзаполнить форму загрузки"):
-            # заполним session_state аналогично админской форме
-            st.session_state['upload_subject'] = handout_subject
-            st.session_state['upload_grade'] = handout_grade
-            st.session_state['upload_topic_prefill'] = handout_topic
-            st.success("Форма загрузки предзаполнена. Перейдите в админ-панель для проверки (если есть доступ).")
+            save_cols = st.columns([1, 1, 2])
+            handout_docx_title = _normalize_material_filename(
+                grade=handout_grade,
+                kind="раздатка",
+                topic=handout_topic or "материал",
+                ext="docx",
+            )
+
+            # Показываем одну кнопку-скачивалку, которая отдаёт .docx напрямую (без записи на диск)
+            try:
+                src_md = st.session_state.get("handout_generated_md") or ""
+                md_norm = normalize_ai_markdown(_postprocess_plan_text(src_md))
+                html_for_docx = quill_html_utils.sanitize_html_for_quill(markdown_to_html(md_norm))
+                bytes_docx = _html_to_docx_bytes(html_for_docx)
+
+                from storage import create_material
+
+                topics_csv = (handout_topic or "").strip() or None
+                user_id = st.session_state.get("user_id")
+
+                def _register_handout():
+                    try:
+                        create_material(
+                            filename=handout_docx_title,
+                            uploader_id=user_id,
+                            topics=topics_csv,
+                            path=None,
+                            subject=handout_subject,
+                            grade=handout_grade,
+                        )
+                        st.session_state["handout_last_registered"] = True
+                    except Exception:
+                        logging.exception("Error while registering handout in DB")
+
+                # Отдаём файл клиенту напрямую — кнопка инициирует скачивание в браузере.
+                try:
+                    save_cols[0].download_button(
+                        "Скачать раздаточный материал",
+                        data=bytes_docx,
+                        file_name=handout_docx_title,
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        on_click=_register_handout,
+                    )
+                except Exception:
+                    logging.exception("Error while creating download button for handout")
+                    st.error("Не удалось подготовить файл для скачивания. Попробуйте ещё раз.")
+
+            except Exception as e:
+                logging.exception("Error while preparing handout bytes for download")
+                st.error(f"Ошибка при подготовке раздатки: {e}")
+
+        # Блок "Создать раздатку из текущего плана" временно скрыт
+        # (удален по запросу пользователя — можно вернуть при необходимости)
 
     # ----- Вкладка: Викторина -----
     with tab_quiz:
-        st.subheader("Создать шаблон викторины")
-        quiz_title = st.text_input("Название викторины", value=st.session_state.get("gen_topic", ""))
-        num_q = st.number_input("Число вопросов", min_value=1, max_value=50, value=5)
-        if st.button("Скачать шаблон викторины (.json)"):
-            quiz = {
-                "title": quiz_title or "Викторина",
-                "topic": st.session_state.get("gen_topic", ""),
-                "questions": [{"question": "", "choices": [], "answer": None} for _ in range(int(num_q))]
-            }
-            data = json.dumps(quiz, ensure_ascii=False, indent=2).encode("utf-8")
-            try:
-                st.download_button(
-                    "Скачать .json",
-                    data=data,
-                    file_name=f"{_slugify(quiz_title)}.json",
-                    mime="application/json",
-                    on_click="ignore",
+        st.subheader("Викторина (ИИ)")
+
+        def _quiz_mark_prompt_dirty():
+            st.session_state["quiz_prompt_autofill"] = False
+
+        def _quiz_params_changed():
+            st.session_state["quiz_generated_json_text"] = ""
+
+        # Берём тему/предмет/класс из раздатки, если пользователь менял их там;
+        # иначе — из формы генерации плана. Так меньше путаницы "почему не по теме".
+        quiz_subject = (
+            st.session_state.get("handout_subject")
+            or st.session_state.get("gen_subject")
+            or SUBJECTS[0]
+        )
+        quiz_grade = (
+            st.session_state.get("handout_grade")
+            or st.session_state.get("gen_grade")
+            or GRADES[0]
+        )
+        quiz_topic = (
+            (st.session_state.get("handout_topic") or "").strip()
+            or (st.session_state.get("gen_topic") or "").strip()
+        )
+
+        st.caption(
+            f"Используем для викторины: {quiz_subject} • {quiz_grade} • Тема: {quiz_topic or '—'}"
+        )
+
+        params_cols = st.columns([2, 1, 2])
+        quiz_title = params_cols[0].text_input(
+            "Название викторины",
+            value=(quiz_topic or "Викторина"),
+            key="quiz_title",
+            on_change=_quiz_params_changed,
+        )
+        quiz_num_questions = params_cols[1].slider(
+            "Вопросов",
+            min_value=5,
+            max_value=30,
+            value=10,
+            step=1,
+            key="quiz_num_questions",
+            on_change=_quiz_params_changed,
+        )
+        quiz_difficulty = params_cols[2].selectbox(
+            "Сложность",
+            ["Смешанная", "Лёгкая", "Средняя", "Сложная"],
+            index=0,
+            key="quiz_difficulty",
+            on_change=_quiz_params_changed,
+        )
+
+        quiz_types = st.multiselect(
+            "Форматы вопросов",
+            [
+                "Выбор одного ответа",
+                "Несколько ответов",
+                "Верно/неверно",
+                "Короткий ответ",
+            ],
+            default=["Выбор одного ответа", "Верно/неверно"],
+            key="quiz_types",
+            on_change=_quiz_params_changed,
+        )
+        quiz_time_min = st.number_input(
+            "Ориентировочное время (мин)",
+            min_value=5,
+            max_value=90,
+            value=15,
+            step=5,
+            key="quiz_time_min",
+            on_change=_quiz_params_changed,
+        )
+
+        # Авто-промпт для викторины
+        types_hint = ", ".join(quiz_types) if quiz_types else "на твой выбор"
+        auto_prompt = (
+            "Ты — опытный учитель и методист. Составь школьную викторину для проверки понимания темы.\n\n"
+            "ВАЖНО: все вопросы должны быть строго по теме, указанной ниже.\n\n"
+            f"Предмет: {quiz_subject}.\n"
+            f"Класс: {quiz_grade}.\n"
+            "ТЕМА (главная):\n"
+            f"\"\"\"\n{quiz_topic or '(тема не указана)'}\n\"\"\"\n"
+            f"Название викторины: {quiz_title or 'Викторина'}.\n"
+            f"Количество вопросов: {int(quiz_num_questions)}.\n"
+            f"Сложность: {quiz_difficulty}.\n"
+            f"Форматы вопросов: {types_hint}.\n"
+            f"Время выполнения: ~{int(quiz_time_min)} минут.\n\n"
+            "Требования к качеству:\n"
+            "- Уровень и язык: строго по возрасту/классу, без спорных/взрослых тем.\n"
+            "- Проверяй факты, избегай двусмысленности формулировок.\n"
+            "- Если тема содержит математику/формулы: НЕ используй LaTeX и обратные слэши; пиши формулы обычным текстом.\n"
+            "- Для вопросов с вариантами ответов: ровно 4 варианта (A–D), один или несколько верных по типу.\n"
+            "- Для 'Верно/неверно': варианты ['Верно','Неверно'].\n"
+            "- Для 'Короткий ответ': дай краткий ожидаемый ответ (строка).\n"
+            "- Добавь краткое пояснение (1 предложение) почему ответ верный — в поле explanation.\n\n"
+            "Верни СТРОГО валидный JSON (без markdown, без ```), в следующей структуре:\n"
+            "{\n"
+            "  'title': string,\n"
+            "  'subject': string,\n"
+            "  'grade': string,\n"
+            "  'topic': string,\n"
+            "  'difficulty': string,\n"
+            "  'time_minutes': number,\n"
+            "  'questions': [\n"
+            "    {\n"
+            "      'id': number,\n"
+            "      'type': 'single_choice'|'multiple_choice'|'true_false'|'short_answer',\n"
+            "      'question': string,\n"
+            "      'choices': string[],\n"
+            "      'answer': number|string|number[],\n"
+            "      'explanation': string,\n"
+            "      'points': number\n"
+            "    }\n"
+            "  ]\n"
+            "}\n\n"
+            "Правила для answer:\n"
+            "- single_choice/true_false: индекс правильного варианта (0..3 или 0..1 для true_false)\n"
+            "- multiple_choice: список индексов (например [0,2])\n"
+            "- short_answer: строка\n"
+        )
+
+        st.session_state.setdefault("quiz_prompt_autofill", True)
+        if st.session_state.get("quiz_prompt_autofill"):
+            st.session_state["quiz_prompt_editor"] = auto_prompt
+        else:
+            st.info("Промпт был изменён вручную и не автообновляется. Нажмите «Сбросить к авто», если тема/параметры изменились.")
+
+        with st.expander("Шаблон для генерации (можно править)", expanded=False):
+            prompt_cols = st.columns([1, 3])
+            if prompt_cols[0].button("Сбросить к авто", key="quiz_prompt_reset_btn"):
+                st.session_state["quiz_prompt_autofill"] = True
+                st.session_state["quiz_prompt_editor"] = auto_prompt
+
+            st.text_area(
+                "Промпт",
+                height=240,
+                key="quiz_prompt_editor",
+                on_change=_quiz_mark_prompt_dirty,
+            )
+
+        gen_cols = st.columns([1, 1, 2])
+        if gen_cols[0].button("Сгенерировать викторину (ИИ)", key="quiz_generate_btn"):
+            api_key_local = st.session_state.get("api_key") or os.getenv("OPENROUTER_API_KEY")
+            if not api_key_local:
+                st.error("Укажите OpenRouter API key в сайдбаре (sk-or-v1-...).")
+            elif not quiz_topic:
+                st.warning("Сначала задайте тему (в форме плана урока).")
+            else:
+                prompt_text = (st.session_state.get("quiz_prompt_editor") or auto_prompt).strip()
+                with st.spinner("Генерирую викторину..."):
+                    resp = generate_with_deepseek(api_key_local, prompt_text)
+                raw = (
+                    resp.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
                 )
-            except KeyError:
-                logging.exception("Missing media key when creating quiz download button")
-                st.error("Файл временно недоступен. Пожалуйста, перезагрузите страницу и повторите попытку.")
-            except Exception:
-                logging.exception("Error while creating quiz download button")
-                st.error("Не удалось подготовить файл для скачивания. Попробуйте ещё раз.")
+
+                def _extract_json(text: str) -> str:
+                    if not text:
+                        return ""
+                    t = text.strip()
+                    if t.startswith("```"):
+                        t = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", t)
+                        t = re.sub(r"```\s*$", "", t).strip()
+                    m = re.search(r"\{.*\}", t, flags=re.S)
+                    return (m.group(0) if m else t).strip()
+
+                st.session_state["quiz_generated_json_text"] = _extract_json(raw)
+
+        if gen_cols[1].button("Очистить", key="quiz_clear_btn"):
+            st.session_state["quiz_generated_json_text"] = ""
+
+        def _quiz_to_markdown(q: dict) -> str:
+            title = (q.get("title") or quiz_title or "Викторина").strip()
+            subject = (q.get("subject") or quiz_subject or "").strip()
+            grade = (q.get("grade") or quiz_grade or "").strip()
+            topic = (q.get("topic") or quiz_topic or "").strip()
+            difficulty = (q.get("difficulty") or quiz_difficulty or "").strip()
+            time_minutes = q.get("time_minutes") or quiz_time_min
+
+            lines = [f"# {title}"]
+            meta = []
+            if subject:
+                meta.append(f"Предмет: {subject}")
+            if grade:
+                meta.append(f"Класс: {grade}")
+            if topic:
+                meta.append(f"Тема: {topic}")
+            if difficulty:
+                meta.append(f"Сложность: {difficulty}")
+            if time_minutes:
+                meta.append(f"Время: ~{int(time_minutes)} мин")
+            if meta:
+                lines.append("\n" + "  ".join(meta) + "\n")
+
+            questions = q.get("questions") or []
+            answer_key = []
+            type_labels = {
+                "single_choice": "Выбор одного ответа",
+                "multiple_choice": "Несколько ответов",
+                "true_false": "Верно/неверно",
+                "short_answer": "Короткий ответ",
+            }
+
+            for idx, qq in enumerate(questions, start=1):
+                q_type = (qq.get("type") or "").strip()
+                q_text = (qq.get("question") or "").strip()
+                choices = qq.get("choices") or []
+                answer = qq.get("answer")
+                explanation = (qq.get("explanation") or "").strip()
+
+                lines.append(f"## Вопрос {idx}")
+                if q_type:
+                    lines.append(f"Тип: {type_labels.get(q_type, q_type)}")
+                lines.append(q_text or "(без текста вопроса)")
+
+                if choices:
+                    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                    for c_i, c in enumerate(choices):
+                        prefix = letters[c_i] if c_i < len(letters) else str(c_i + 1)
+                        lines.append(f"- {prefix}. {(str(c) or '').strip()}")
+
+                answer_str = ""
+                if isinstance(answer, list):
+                    try:
+                        answer_str = ", ".join(str(a) for a in answer)
+                    except Exception:
+                        answer_str = str(answer)
+                else:
+                    answer_str = "" if answer is None else str(answer)
+
+                if answer_str or explanation:
+                    key_line = f"{idx}. Ответ: {answer_str}" if answer_str else f"{idx}. Ответ: (не указан)"
+                    if explanation:
+                        key_line += f" — {explanation}"
+                    answer_key.append(key_line)
+
+                lines.append("")
+
+            if answer_key:
+                lines.append("---")
+                lines.append("# Ключ ответов")
+                lines.extend(answer_key)
+
+            return "\n".join(lines).strip() + "\n"
+
+        # Результат
+        if (st.session_state.get("quiz_generated_json_text") or "").strip():
+            quiz_text = st.session_state["quiz_generated_json_text"]
+
+            quiz_obj = None
+            parse_error = None
+            try:
+                quiz_obj = json.loads(quiz_text)
+            except Exception as e:
+                parse_error = e
+
+            if quiz_obj and isinstance(quiz_obj, dict):
+                st.markdown("### Результат")
+                # Показываем человекочитаемый вид викторины в компактном окне.
+                try:
+                    quiz_md_preview = _quiz_to_markdown(quiz_obj)
+                    quiz_html = markdown_to_html(quiz_md_preview)
+                    # Увеличиваем размер именно для заголовков с конкретными словами
+                    try:
+                        from bs4 import BeautifulSoup
+
+                        soup = BeautifulSoup(quiz_html, "html.parser")
+                        # сравниваем без учёта регистра, ищем фразы внутри текста заголовка
+                        special = {"раздаточный материал", "конспект", "викторина"}
+                        for tag in soup.find_all(["h1", "h2", "h3"]):
+                            text = (tag.get_text(strip=True) or "").lower()
+                            if any(text == s or s in text for s in special):
+                                # Добавляем/обновляем inline-стиль для явного увеличения шрифта заголовка
+                                existing = (tag.get("style", "") or "").strip()
+                                existing = existing.rstrip(";")
+                                new_styles = "font-size:2.0rem; font-weight:800;"
+                                tag["style"] = (f"{existing}; {new_styles}" if existing else new_styles)
+                        quiz_html = str(soup)
+                    except Exception:
+                        # если BeautifulSoup недоступен или что-то пошло не так, продолжаем с исходным HTML
+                        pass
+
+                    preview_html = (
+                        "<style>"
+                        ".qa-preview h1{font-size:1.25rem;margin:0.4rem 0;}"
+                        ".qa-preview h2{font-size:1.1rem;margin:0.35rem 0;}"
+                        ".qa-preview h3{font-size:1rem;margin:0.3rem 0;}"
+                        ".qa-preview p{margin:0.25rem 0;}"
+                        "</style>"
+                        f"<div class='qa-preview' style='max-height:260px; overflow:auto; padding:0.6rem; border:1px solid #e6e6e6; background:#ffffff; border-radius:6px'>{quiz_html}</div>"
+                    )
+                    st.markdown(preview_html, unsafe_allow_html=True)
+                except Exception:
+                    st.warning("Не удалось сформировать превью викторины. Откройте JSON в экспандере для отладки.")
+
+                with st.expander("Показать / править JSON (отладка)", expanded=False):
+                    # Внутри экспандера даём текстовый редактор для корректировок
+                    st.session_state["quiz_generated_json_text"] = st.text_area(
+                        "quiz_generated_json_editor",
+                        value=st.session_state["quiz_generated_json_text"],
+                        height=320,
+                        label_visibility="collapsed",
+                    )
+                    try:
+                        st.json(json.loads(st.session_state["quiz_generated_json_text"]))
+                    except Exception:
+                        st.warning("Текущий JSON некорректен.")
+            else:
+                # Некорректный JSON — показываем редактор сразу и предупреждение
+                st.markdown("### Результат (JSON — ошибка парсинга)")
+                st.warning(f"Не удалось распарсить JSON: {parse_error}")
+                st.session_state["quiz_generated_json_text"] = st.text_area(
+                    "quiz_generated_json_editor",
+                    value=st.session_state["quiz_generated_json_text"],
+                    height=320,
+                    label_visibility="collapsed",
+                )
+
+            
+
+            if isinstance(quiz_obj, dict):
+                try:
+                    quiz_md = _quiz_to_markdown(quiz_obj)
+                    md_norm = normalize_ai_markdown(_postprocess_plan_text(quiz_md))
+                    html_for_docx = quill_html_utils.sanitize_html_for_quill(markdown_to_html(md_norm))
+                    bytes_docx = _html_to_docx_bytes(html_for_docx)
+
+                    st.download_button(
+                        "Скачать викторину (.docx)",
+                        data=bytes_docx,
+                        file_name=_normalize_material_filename(
+                            grade=quiz_grade,
+                            kind="викторина",
+                            topic=quiz_topic or quiz_title or "викторина",
+                            ext="docx",
+                        ),
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        on_click="ignore",
+                        key="quiz_download_docx_btn",
+                    )
+                except Exception as e:
+                    logging.exception("Error while converting quiz to docx")
+                    st.error(f"Не удалось собрать .docx: {e}")
+
+        st.markdown("---")
+        st.markdown("### Пустой шаблон (если хотите заполнить вручную)")
+        num_q_tpl = st.number_input("Число вопросов (шаблон)", min_value=1, max_value=50, value=10, key="quiz_tpl_num_q")
+        quiz_tpl = {
+            "title": quiz_title or "Викторина",
+            "subject": quiz_subject,
+            "grade": quiz_grade,
+            "topic": quiz_topic,
+            "difficulty": quiz_difficulty,
+            "time_minutes": int(quiz_time_min),
+            "questions": [
+                {"id": i + 1, "type": "single_choice", "question": "", "choices": ["", "", "", ""], "answer": 0, "explanation": "", "points": 1}
+                for i in range(int(num_q_tpl))
+            ],
+        }
+        st.download_button(
+            "Скачать пустой шаблон (.json)",
+            data=json.dumps(quiz_tpl, ensure_ascii=False, indent=2).encode("utf-8"),
+            file_name=f"{_slugify(quiz_title or 'quiz')}_template.json",
+            mime="application/json",
+            on_click="ignore",
+            key="quiz_download_template_btn",
+        )
 
     # Подсказка: быстрый поиск и просмотр материалов (как дополнительный блок)
     with st.expander("Поиск по материалам / AI-помощник"):
