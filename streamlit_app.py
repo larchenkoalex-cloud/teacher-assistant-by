@@ -10,6 +10,7 @@ from pathlib import Path
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup, NavigableString
+import logging
 
 try:
     from streamlit_quill import st_quill
@@ -109,6 +110,23 @@ st.markdown(
     <style>
     .block-container {
         padding-left: 1rem !important;
+        padding-top: 2rem !important;
+        overflow: visible !important;
+        position: relative !important;
+        z-index: 1000 !important;
+    }
+    /* Предотвращаем срезание заголовка: убираем верхний margin у заголовков и поднимаем их над фоном */
+    .block-container h1,
+    .block-container h2,
+    .block-container h3 {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+        position: relative !important;
+        z-index: 1100 !important;
+    }
+    /* Если какие-то фиксированные панели перекрывают контент, гарантируем видимость заголовка */
+    header[data-testid="stHeader"] {
+        z-index: 1200 !important;
     }
     .gen-stream-box {
         width: 100% !important;
@@ -132,6 +150,30 @@ st.markdown(
         margin: 0;
         white-space: pre-wrap;
     }
+    /* Сделать все кнопки светло-салатовыми */
+    .stButton>button, div.stButton>button {
+        background-color: #dff6d8 !important;
+        color: #063806 !important;
+        border: 1px solid #9fd48a !important;
+        box-shadow: none !important;
+        padding: 0.45rem 0.7rem !important;
+    }
+    .stButton>button:hover, div.stButton>button:hover {
+        background-color: #c8f0b8 !important;
+    }
+    .stButton>button:active, div.stButton>button:active {
+        background-color: #b0e998 !important;
+    }
+    .stButton>button:focus, div.stButton>button:focus {
+        outline: 2px solid #8fd273 !important;
+        outline-offset: 1px !important;
+    }
+    /* Сохранить стиль дизейбледа по умолчанию (тёмно-серый фон) */
+    .stButton>button:disabled, div.stButton>button:disabled {
+        opacity: 0.55 !important;
+        background-color: unset !important;
+        color: unset !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -141,6 +183,7 @@ st.markdown(
 init_db()
 
 st.title("Teacher Assistant — помощник для учителя")
+st.markdown("Используйте форму слева для генерации плана урока и предпросмотр справа для правок.")
 
 # Sidebar settings header
 st.sidebar.header("Настройки DeepSeek (OpenRouter)")
@@ -156,6 +199,15 @@ _env_key = os.getenv("OPENROUTER_API_KEY")  # Изменили имя!
 api_key_input = st.sidebar.text_input("OpenRouter API key", type="password", 
                                       help="Ключ начинается с sk-or-v1-...")
 api_key = _secrets_key or _env_key or api_key_input
+
+# Нормализуем: часто при копипасте добавляются пробелы/кавычки
+try:
+    api_key = (api_key or "").strip().strip('"').strip("'")
+except Exception:
+    pass
+if not api_key:
+    api_key = None
+
 try:
     # Сохраняем в session_state, чтобы другие блоки (inline AI и пр.) могли читать ключ
     st.session_state["api_key"] = api_key
@@ -164,6 +216,8 @@ except Exception:
 
 # Фиксированный URL для OpenRouter (не настраиваемый)
 DEEPSEEK_API_BASE = "https://openrouter.ai/api/v1/chat/completions"
+
+# (debug lines removed)
 
 # Показываем источник ключа
 if api_key:
@@ -181,6 +235,37 @@ else:
 
 show_deepseek_debug = st.sidebar.checkbox("Показывать отладку API", value=False)
 
+if show_deepseek_debug:
+    # Показываем «отпечаток» ключа (без раскрытия полного значения)
+    if api_key:
+        try:
+            key_len = len(api_key)
+            key_prefix = api_key[:10]
+            key_tail = api_key[-6:]
+            st.sidebar.caption(
+                f"Ключ: len={key_len}, prefix={key_prefix}…, tail=…{key_tail}, source={api_key_source}"
+            )
+            if not api_key.startswith("sk-or-v1-"):
+                st.sidebar.warning("Похоже, это не OpenRouter ключ. Нужен формат sk-or-v1-…")
+            if api_key_source in {"st.secrets", "env"} and api_key_input:
+                st.sidebar.info(
+                    "Введённый ключ в сайдбаре сейчас НЕ используется (приоритет у secrets/env). "
+                    "Очистите env/secrets или задайте правильный ключ там."
+                )
+        except Exception:
+            pass
+
+    try:
+        with open("openrouter_debug.log", "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+        tail = "".join(lines[-80:])
+        st.sidebar.caption("openrouter_debug.log (последние строки)")
+        st.sidebar.code(tail or "(пока пусто)")
+    except FileNotFoundError:
+        st.sidebar.caption("openrouter_debug.log ещё не создан")
+    except Exception as e:
+        st.sidebar.caption(f"Не удалось прочитать openrouter_debug.log: {e}")
+
 # Опция показа последних планов (по умолчанию скрыта)
 show_recent_plans = st.sidebar.checkbox("Показывать последние сохранённые планы", value=False)
 
@@ -195,7 +280,9 @@ if st.sidebar.button("Проверить подключение к API"):
                     DEEPSEEK_API_BASE,
                     headers={
                         "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json"
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://teacher-assistant.streamlit.app",
+                        "X-Title": "Teacher Assistant",
                     },
                     json={
                         "model": "deepseek/deepseek-chat",
@@ -206,8 +293,21 @@ if st.sidebar.button("Проверить подключение к API"):
                 )
                 if response.status_code == 200:
                     st.sidebar.success("✅ API работает!")
+                elif response.status_code == 401:
+                    st.sidebar.error("❌ 401 Unauthorized: неверный OpenRouter API key (нужен sk-or-v1-…).")
+                    try:
+                        open("openrouter_debug.log", "a", encoding="utf-8").write(
+                            f"[check_api] 401 unauthorized; key_source={api_key_source}\n"
+                        )
+                    except Exception:
+                        pass
                 else:
                     st.sidebar.error(f"❌ Ошибка API: {response.status_code}")
+                    if show_deepseek_debug:
+                        try:
+                            st.sidebar.code((response.text or "")[:2000])
+                        except Exception:
+                            pass
             except Exception as e:
                 st.sidebar.error(f"❌ Ошибка: {e}")
 
@@ -340,8 +440,17 @@ def stream_generate_chat_via_api(*, messages: list, headers: dict, placeholder, 
             on_update=_on_update,
             model=model,
         )
-    except Exception:
-        return ""
+    except openrouter_client.PaymentRequiredError:
+        # Пробрасываем дальше специфичную ошибку оплаты, чтобы UI мог её отобразить
+        raise
+    except Exception as e:
+        try:
+            open("openrouter_debug.log", "a", encoding="utf-8").write(
+                f"[stream_generate_chat_via_api] EXCEPTION model={model!r} messages={len(messages) if messages else 0} type={type(e).__name__} msg={e!r}\n"
+            )
+        except Exception:
+            pass
+        raise
 
 
 def is_admin() -> bool:
@@ -395,7 +504,7 @@ def _build_lesson_plan_messages(*, subject: str, grade: str, topic: str, lesson_
     # Языковые особенности — добавляем инструкции, если предмет — белорусский или английский
     language_tail = ""
     subj_lower = (subject or "").lower()
-    if "белоро" in subj_lower or "беларус" in subj_lower:
+    if "белору" in subj_lower or "беларус" in subj_lower:
         language_tail = (
             "Ответ сформулируй на белорусском языке. Учитывай нормы белорусской орфографии и фонетики, "
             "включи упражнения на чтение, письмо и работу с текстом, варианты дифференцированных заданий. "
@@ -452,7 +561,7 @@ def _build_lesson_plan_messages(*, subject: str, grade: str, topic: str, lesson_
         prompt = prompt + "\n\nДополнительно: " + extra_instructions
 
     language_mode = None
-    if "белоро" in subj_lower or "беларус" in subj_lower:
+    if "белору" in subj_lower or "беларус" in subj_lower:
         language_mode = "be"
     elif "иностранн" in subj_lower and "англ" in subj_lower or "английск" in subj_lower:
         language_mode = "en"
@@ -642,13 +751,14 @@ def _html_to_docx_bytes(html: str) -> bytes:
     return buff.getvalue()
 
 
-st.header("Генерация плана урока (ИИ)")
+
 
 # Разделяем экран: левая колонка — форма генерации, правая — редактор результата
 # Уменьшаем левый отступ/ширину левой колонки вдвое (раньше было [2,3])
 col_form, col_editor = st.columns([1, 3])
 
 with col_form:
+    st.markdown("<h3 style=\"text-align:left; margin-top:0.25rem; margin-bottom:0.5rem;\">Генерация плана урока (ИИ)</h3>", unsafe_allow_html=True)
     grade = st.selectbox("Класс", GRADES, index=3, key="gen_grade")
     subject = st.selectbox("Предмет", SUBJECTS, index=0, key="gen_subject")
     topic = st.text_area(
@@ -678,7 +788,7 @@ with col_form:
         index=1,
         key="gen_class_level",
     )
-    notes = st.text_area("Особенности класса / пожелания", placeholder="Уровень класса, акценты, что важно подчеркнуть...")
+    notes = st.text_area("Особенности класса / пожелания", placeholder="Особенность класса, акценты, приём мотивации, что важно подчеркнуть...")
     # (Упрощено) шаблон промпта можно править вручную внизу — кнопка автозагрузки убрана
 
     # Редактируемый шаблон промпта (можно подправить перед генерацией)
@@ -686,17 +796,36 @@ with col_form:
         st.session_state["prompt_template"] = ""
     # Кнопка генерации перемещена над шаблоном промпта по просьбе пользователя
     generate_clicked = st.button("Сгенерировать план урока")
-    with st.expander("Шаблон промпта (можно править)"):
-        st.text_area("Шаблон промпта", key="prompt_template", height=200)
-    model_choice = st.selectbox(
-        "Источник генерации",
-        [
-            "Локальный шаблон (без API)",
-            "Deepseek API (через ключ)",
-        ],
-        index=1,
-    )
-    visibility = st.selectbox("Видимость плана", ["public", "private", "pending"], index=0)
+    # Подтверждение очистки перед генерацией нового плана
+    if "confirm_new_generation" not in st.session_state:
+        st.session_state["confirm_new_generation"] = False
+    with st.expander("Шаблон запроса (можно править)"):
+        btns = st.columns([1, 1])
+        if btns[0].button("Загрузить запрос по умолчанию"):
+            if not subject or not topic:
+                st.warning("Укажите предмет и тему, чтобы загрузить автопромпт.")
+            else:
+                try:
+                    msgs = _build_lesson_plan_messages(
+                        subject=subject,
+                        grade=grade,
+                        topic=topic,
+                        lesson_type=lesson_type,
+                        class_level=class_level,
+                        notes=notes,
+                        extra_instructions="",
+                    )
+                    if msgs:
+                        st.session_state["prompt_template"] = msgs[-1].get("content", "")
+                except Exception as e:
+                    st.error(f"Не удалось сгенерировать промпт: {e}")
+        if btns[1].button("Сбросить запрос"):
+            st.session_state["prompt_template"] = ""
+        st.text_area("Шаблон запроса", key="prompt_template", height=200, placeholder="Оставьте пустым для автоподстановки")
+    # Скрываем селектбокс выбора источника генерации — фиксируем Deepseek по умолчанию
+    model_choice = "Deepseek API (через ключ)"
+    # Временно убираем выбор видимости из UI — все сохранения будут помечаться как private
+    visibility = "private"
 
     # Подсказки тем из существующих материалов и планов для выбранного предмета и класса
     existing_plans = list_lesson_plans(limit=300)
@@ -751,43 +880,128 @@ with col_form:
                     safe_rerun()
                     st.stop()
 
+    # Проверяем, есть ли уже материал в предпросмотре
+    existing_preview = bool(
+        (st.session_state.get("generated_content") or "")
+        or (st.session_state.get("preview_html") or "")
+        or (st.session_state.get("stream_buffer") or "")
+    )
+
+    def _begin_generation() -> None:
+        """Очищает предпросмотр и инициализирует состояние новой генерации."""
+        st.session_state["preview_apply_replace"] = None
+        st.session_state["preview_request_selection"] = None
+        st.session_state["preview_request_uid"] = None
+        st.session_state["preview_pending_action"] = None
+        st.session_state["preview_selected_range"] = None
+        st.session_state["preview_selected_text"] = ""
+        st.session_state["preview_rewrite_range"] = None
+        st.session_state["preview_rewrite_source"] = ""
+        st.session_state["preview_rewrite_result"] = ""
+        st.session_state["preview_src_view"] = ""
+        st.session_state["preview_res_view"] = ""
+        st.session_state["preview_fill_widgets"] = None
+        st.session_state["preview_html"] = ""
+        st.session_state["generated_content"] = ""
+
+        api_key_local = st.session_state.get("api_key") or os.getenv("OPENROUTER_API_KEY")
+        if not api_key_local:
+            st.error("Укажите OpenRouter API key в сайдбаре (sk-or-v1-...).")
+            return
+
+        headers_local = _build_openrouter_headers(api_key_local)
+        messages_local = _build_lesson_plan_messages(
+            subject=subject,
+            grade=grade,
+            topic=topic,
+            lesson_type=lesson_type,
+            class_level=class_level,
+            notes=notes,
+            extra_instructions=st.session_state.get("prompt_template", ""),
+        )
+
+        st.session_state["is_generating"] = True
+        st.session_state["start_stream_now"] = True
+        st.session_state["stream_buffer"] = ""
+        st.session_state["generated_headers"] = headers_local
+        st.session_state["generated_messages"] = messages_local
+        st.session_state["generated_model"] = "deepseek/deepseek-chat"
+        topic_title = (topic or "").splitlines()[0].strip() or (topic or "")
+        st.session_state["generated_title"] = f"{subject or 'Урок'} — {topic_title}"[:200]
+
+    # 1) Нажатие на генерацию
+    if generate_clicked:
         if not subject or not topic:
             st.warning("Укажите хотя бы предмет и тему урока.")
-        elif model_choice == "Deepseek API (через ключ)" and api_key:
-            headers = _build_openrouter_headers(api_key)
-            messages = _build_lesson_plan_messages(
-                subject=subject,
-                grade=grade,
-                topic=topic,
-                lesson_type=lesson_type,
-                class_level=class_level,
-                notes=notes,
-                extra_instructions=st.session_state.get("prompt_template", ""),
-            )
+        elif existing_preview:
+            st.session_state["confirm_new_generation"] = True
+        else:
+            _begin_generation()
+            safe_rerun()
 
-            # Начинаем новую генерацию — сбрасываем состояние предпросмотра и буферы
-            st.session_state["preview_apply_replace"] = None
-            st.session_state["preview_request_selection"] = None
-            st.session_state["preview_request_uid"] = None
-            st.session_state["preview_pending_action"] = None
-            st.session_state["preview_selected_range"] = None
-            st.session_state["preview_selected_text"] = ""
-            st.session_state["preview_rewrite_range"] = None
-            st.session_state["preview_rewrite_source"] = ""
-            st.session_state["preview_rewrite_result"] = ""
-            st.session_state["preview_src_view"] = ""
-            st.session_state["preview_res_view"] = ""
-            st.session_state["preview_fill_widgets"] = None
+    # 2) Экран подтверждения (виден до тех пор, пока пользователь не подтвердит/не отменит)
+    if st.session_state.get("confirm_new_generation"):
+        st.warning(
+            "Сейчас в предпросмотре уже есть материал. Новый план очистит текущий текст. "
+            "Подтвердите, чтобы продолжить."
+        )
+        c1, c2 = st.columns([1, 1])
+        if c1.button("Подтвердить и сгенерировать", key="confirm_generate_btn"):
+            st.session_state["confirm_new_generation"] = False
+            if not subject or not topic:
+                st.warning("Укажите хотя бы предмет и тему урока.")
+            else:
+                _begin_generation()
+                safe_rerun()
+        if c2.button("Отмена", key="cancel_generate_btn"):
+            st.session_state["confirm_new_generation"] = False
+            safe_rerun()
 
-            st.session_state["is_generating"] = True
-            st.session_state["start_stream_now"] = True
-            st.session_state["stream_buffer"] = ""
-            st.session_state["generated_headers"] = headers
-            st.session_state["generated_messages"] = messages
-            st.session_state["generated_model"] = "deepseek/deepseek-chat"
-            # Формируем читаемый заголовок из первой строки темы (без переносов)
-            topic_title = (topic or "").splitlines()[0].strip() or (topic or "")
-            st.session_state["generated_title"] = f"{subject or 'Урок'} — {topic_title}"[:200]
+    # 3) Обычная логика генерации (для кейса без подтверждения)
+    if False:
+        pass
+
+    if False:
+        if not subject or not topic:
+            st.warning("Укажите хотя бы предмет и тему урока.")
+        elif model_choice == "Deepseek API (через ключ)":
+            if not api_key:
+                st.error("Укажите OpenRouter API key в сайдбаре (sk-or-v1-...).")
+            else:
+                headers = _build_openrouter_headers(api_key)
+                messages = _build_lesson_plan_messages(
+                    subject=subject,
+                    grade=grade,
+                    topic=topic,
+                    lesson_type=lesson_type,
+                    class_level=class_level,
+                    notes=notes,
+                    extra_instructions=st.session_state.get("prompt_template", ""),
+                )
+
+                # Начинаем новую генерацию — сбрасываем состояние предпросмотра и буферы
+                st.session_state["preview_apply_replace"] = None
+                st.session_state["preview_request_selection"] = None
+                st.session_state["preview_request_uid"] = None
+                st.session_state["preview_pending_action"] = None
+                st.session_state["preview_selected_range"] = None
+                st.session_state["preview_selected_text"] = ""
+                st.session_state["preview_rewrite_range"] = None
+                st.session_state["preview_rewrite_source"] = ""
+                st.session_state["preview_rewrite_result"] = ""
+                st.session_state["preview_src_view"] = ""
+                st.session_state["preview_res_view"] = ""
+                st.session_state["preview_fill_widgets"] = None
+
+                st.session_state["is_generating"] = True
+                st.session_state["start_stream_now"] = True
+                st.session_state["stream_buffer"] = ""
+                st.session_state["generated_headers"] = headers
+                st.session_state["generated_messages"] = messages
+                st.session_state["generated_model"] = "deepseek/deepseek-chat"
+                # Формируем читаемый заголовок из первой строки темы (без переносов)
+                topic_title = (topic or "").splitlines()[0].strip() or (topic or "")
+                st.session_state["generated_title"] = f"{subject or 'Урок'} — {topic_title}"[:200]
         else:
             plan_text = generate_lesson_plan_locally(subject, grade, topic, notes, class_level)
             # Локальная генерация: сохраняем в предпросмотр (без загрузки в редактор)
@@ -814,7 +1028,7 @@ with col_form:
 
 with col_editor:
     # Центрируем заголовок в своей колонке
-    st.markdown("<h3 style=\"text-align:center; margin-top:0.25rem; margin-bottom:0.5rem;\">Предпросмотр плана урока</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style=\"text-align:left; margin-top:0.25rem; margin-bottom:0.5rem;\">Предпросмотр плана урока</h3>", unsafe_allow_html=True)
 
     # Оставляем только визуальный редактор (WYSIWYG), чтобы не отвлекать учителя Markdown-разметкой.
 
@@ -838,23 +1052,6 @@ with col_editor:
         or isinstance(st.session_state.get("preview_fill_widgets"), dict)
         or bool(st.session_state.get("preview_rewrite_result"))
     )
-    with st.expander("Предварительный просмотр переделанного фрагмента", expanded=preview_has_content):
-        if (st.session_state.get("preview_src_view") or "").strip():
-            st.caption("Исходный фрагмент")
-            st.text_area(
-                "Исходный фрагмент",
-                height=90,
-                disabled=True,
-                key="preview_src_view",
-                label_visibility="collapsed",
-            )
-        st.caption("Результат (переделанный фрагмент)")
-        st.text_area(
-            "Результат",
-            height=140,
-            key="preview_res_view",
-            label_visibility="collapsed",
-        )
 
     # Редактор убран: работаем только с предпросмотром.
 
@@ -872,12 +1069,25 @@ with col_editor:
             try:
                 if messages and headers:
                     with st.spinner("🤖 Генерирую..."):
-                        full_text = stream_generate_chat_via_api(
-                            messages=messages,
-                            headers=headers,
-                            placeholder=stream_placeholder,
-                            model=model_to_use,
-                        )
+                        try:
+                            full_text = stream_generate_chat_via_api(
+                                messages=messages,
+                                headers=headers,
+                                placeholder=stream_placeholder,
+                                model=model_to_use,
+                            )
+                        except openrouter_client.PaymentRequiredError as pay_err:
+                            # Явно сообщаем пользователю о проблеме с оплатой
+                            try:
+                                msg = str(pay_err)
+                            except Exception:
+                                msg = "Проблема с оплатой на стороне OpenRouter (402)."
+                            st.error(f"Проблема с оплатой OpenRouter: {msg}")
+                            full_text = ""
+                        except Exception as e:
+                            st.error(f"Ошибка запроса к OpenRouter/DeepSeek: {e}")
+                            st.caption("Подробности см. в openrouter_debug.log (в корне проекта).")
+                            full_text = ""
             except Exception:
                 full_text = ""
 
@@ -964,11 +1174,12 @@ with col_editor:
         prev_instr_choice_key = "preview_ai_instr_choice"
         prev_instr_custom_key = "preview_ai_instr_custom"
         if prev_instr_choice_key not in st.session_state:
-            st.session_state[prev_instr_choice_key] = "Сократить и сделать яснее"
+            st.session_state[prev_instr_choice_key] = "Расширить и добавить примеры"
         if prev_instr_custom_key not in st.session_state:
             st.session_state[prev_instr_custom_key] = ""
 
         INSTR_PRESETS = [
+            "Расширить и добавить примеры",
             "Сократить и сделать яснее",
             "Упростить для учеников",
             "Сделать более официально",
@@ -984,10 +1195,33 @@ with col_editor:
                 return (st.session_state.get(prev_instr_custom_key) or "").strip()
             return choice
 
-        st.markdown("**Выделение → Переделать → (посмотреть) → Заменить**")
-        st.selectbox("Инструкция для ИИ", INSTR_PRESETS, key=prev_instr_choice_key)
+        cols_instr = st.columns([1, 1])
+        cols_instr[0].markdown("**Выделение → Переделать → (посмотреть) → Заменить**")
+        cols_instr[0].selectbox("Инструкция для ИИ", INSTR_PRESETS, key=prev_instr_choice_key, label_visibility="collapsed")
+        # Правый столбец используем для показа статуса/спиннера процесса переделки
+        # (`cols_instr[1]` будет наполняться при запуске операции). 
+        cols_instr[1].empty()
         if st.session_state.get(prev_instr_choice_key) == "Свой вариант...":
             st.text_input("Свой вариант инструкции", key=prev_instr_custom_key, placeholder="Например: сделай короче и добавь конкретику")
+
+        # Предварительный просмотр переделанного фрагмента — теперь сразу под селектбокс инструкций
+        with st.expander("Предварительный просмотр переделанного фрагмента", expanded=preview_has_content):
+            if (st.session_state.get("preview_src_view") or "").strip():
+                st.caption("Исходный фрагмент")
+                st.text_area(
+                    "Исходный фрагмент",
+                    height=90,
+                    disabled=True,
+                    key="preview_src_view",
+                    label_visibility="collapsed",
+                )
+            st.caption("Результат (переделанный фрагмент)")
+            st.text_area(
+                "Результат",
+                height=140,
+                key="preview_res_view",
+                label_visibility="collapsed",
+            )
 
         btn_col1, btn_col2 = st.columns([1, 1])
         if btn_col1.button("Переделать выделенный фрагмент"):
@@ -1026,6 +1260,8 @@ with col_editor:
             if preview_md:
                 st.info("Компонент предпросмотра (Quill) недоступен. Проверьте установку/запуск приложения.")
 
+        # (экспандер перемещён выше, под селектбокс инструкций)
+
         if isinstance(evt_preview, dict):
             # Логируем приходящие события от компонента для диагностики
             logs = st.session_state.get("preview_event_log", [])
@@ -1039,6 +1275,10 @@ with col_editor:
                     # Завершаем цикл apply, если он был
                     if st.session_state.get("preview_apply_replace") is not None:
                         st.session_state["preview_apply_replace"] = None
+                        # После того как компонент применил замену, сбрасываем
+                        # информацию о текущем диапазоне замены, чтобы
+                        # кнопка "Заменить выделенный фрагмент" стала неактивной.
+                        st.session_state["preview_rewrite_range"] = None
                         # Не делаем принудительный rerun: событие content уже пришло на rerun.
             elif evt_type == "selection":
                 # Ответ компонента на одноразовый запрос выделения.
@@ -1081,7 +1321,9 @@ with col_editor:
                                 f"Фрагмент:\n---\n{sel_text}\n---\n"
                                 f"Инструкция: {instr}"
                             )
-                            with st.spinner("ИИ переделывает выделение..."):
+                            # Показываем спиннер справа от селектбокса инструкций,
+                            # чтобы пользователь видел прогресс, даже если область предпросмотра вне экрана.
+                            with cols_instr[1].spinner("ИИ переделывает выделение..."):
                                 resp = generate_with_deepseek(api_key, prompt)
                             ai_text = None
                             if isinstance(resp, dict):
@@ -1140,12 +1382,20 @@ with col_editor:
             md = normalize_ai_markdown(_postprocess_plan_text(src_md))
             html_for_docx = quill_html_utils.sanitize_html_for_quill(markdown_to_html(md))
         docx_bytes = _html_to_docx_bytes(html_for_docx)
-        action_cols[1].download_button(
-            label="Скачать .docx",
-            data=docx_bytes,
-            file_name=_normalize_docx_filename(docx_title),
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        )
+        try:
+            action_cols[1].download_button(
+                label="Скачать .docx",
+                data=docx_bytes,
+                file_name=_normalize_docx_filename(docx_title),
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                on_click="ignore",
+            )
+        except KeyError:
+            logging.exception("Missing media key when creating action download button")
+            st.error("Файл временно недоступен. Пожалуйста, перезагрузите страницу и повторите попытку.")
+        except Exception:
+            logging.exception("Error while creating action download button")
+            st.error("Не удалось подготовить файл для скачивания. Попробуйте ещё раз.")
 
         if action_cols[2].button("Очистить"):
             st.session_state["generated_content"] = ""
@@ -1178,13 +1428,21 @@ if show_recent_plans:
 
                     download_ext = "html" if looks_like_html else "md"
                     download_mime = "text/html" if looks_like_html else "text/markdown"
-                    st.download_button(
-                        label=f"Скачать как .{download_ext}",
-                        data=content,
-                        file_name=f"{_slugify(plan.title)}.{download_ext}",
-                        mime=download_mime,
-                        key=f"download_{plan.id}",
-                    )
+                    try:
+                        st.download_button(
+                            label=f"Скачать как .{download_ext}",
+                            data=content,
+                            file_name=f"{_slugify(plan.title)}.{download_ext}",
+                            mime=download_mime,
+                            key=f"download_{plan.id}",
+                            on_click="ignore",
+                        )
+                    except KeyError:
+                        logging.exception("Missing media key when creating plan download button")
+                        st.error("Файл временно недоступен. Пожалуйста, перезагрузите страницу и повторите попытку.")
+                    except Exception:
+                        logging.exception("Error while creating plan download button")
+                        st.error("Не удалось подготовить файл для скачивания. Попробуйте ещё раз.")
         else:
             st.info("Пока нет сохранённых планов. Сгенерируйте первый план слева.")
 
@@ -1195,8 +1453,8 @@ if app_mode == "Пользовательский режим":
 
     # ----- Вкладка: Конспект (текущая работа с планом) -----
     with tab_concept:
-        st.subheader("Конспект: генерация и редактор")
-        st.markdown("Используйте форму слева для генерации плана урока и предпросмотр справа для правок через ПКМ-замену.")
+        st.subheader("Конспект")
+        
         # Показываем быстрый список последних конспектов
         with st.expander("Последние конспекты (файлы .docx)"):
             docs = sorted(materials_dir.glob("*.docx"))[:10]
@@ -1232,28 +1490,42 @@ if app_mode == "Пользовательский режим":
             if not html_for_docx:
                 st.warning("Нет содержимого. Сначала сгенерируйте план урока.")
             else:
-                try:
-                    bytes_docx = _html_to_docx_bytes(html_for_docx)
-                    save_path = materials_dir / docx_title
-                    with open(save_path, "wb") as fh:
-                        fh.write(bytes_docx)
+                        try:
+                            bytes_docx = _html_to_docx_bytes(html_for_docx)
+                            save_path = materials_dir / docx_title
+                            with open(save_path, "wb") as fh:
+                                fh.write(bytes_docx)
 
-                    from storage import create_material
+                            from storage import create_material
 
-                    topics_csv = (handout_topic or "").strip() or None
-                    user_id = st.session_state.get('user_id')
-                    create_material(
-                        filename=docx_title,
-                        uploader_id=user_id,
-                        topics=topics_csv,
-                        path=str(save_path),
-                        subject=handout_subject,
-                        grade=handout_grade,
-                    )
-                    st.success(f"Раздаточный материал создан и сохранён: {docx_title}")
-                    st.download_button("Скачать .docx", data=bytes_docx, file_name=docx_title, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-                except Exception as e:
-                    st.error(f"Ошибка при создании раздатки: {e}")
+                            topics_csv = (handout_topic or "").strip() or None
+                            user_id = st.session_state.get('user_id')
+                            create_material(
+                                filename=docx_title,
+                                uploader_id=user_id,
+                                topics=topics_csv,
+                                path=str(save_path),
+                                subject=handout_subject,
+                                grade=handout_grade,
+                            )
+                            st.success(f"Раздаточный материал создан и сохранён: {docx_title}")
+                            try:
+                                st.download_button(
+                                    "Скачать .docx",
+                                    data=bytes_docx,
+                                    file_name=docx_title,
+                                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                    on_click="ignore",
+                                )
+                            except KeyError as ke:
+                                logging.exception("Missing media key when creating download button")
+                                st.error("Файл временно недоступен. Пожалуйста, перезагрузите страницу и повторите попытку.")
+                            except Exception as e:
+                                logging.exception("Error while preparing download button")
+                                st.error("Не удалось подготовить файл для скачивания. Попробуйте ещё раз.")
+                        except Exception as e:
+                            logging.exception("Error while creating docx file for handout")
+                            st.error(f"Ошибка при создании раздатки: {e}")
 
         if col2.button("Предзаполнить форму загрузки"):
             # заполним session_state аналогично админской форме
@@ -1274,7 +1546,20 @@ if app_mode == "Пользовательский режим":
                 "questions": [{"question": "", "choices": [], "answer": None} for _ in range(int(num_q))]
             }
             data = json.dumps(quiz, ensure_ascii=False, indent=2).encode("utf-8")
-            st.download_button("Скачать .json", data=data, file_name=f"{_slugify(quiz_title)}.json", mime="application/json")
+            try:
+                st.download_button(
+                    "Скачать .json",
+                    data=data,
+                    file_name=f"{_slugify(quiz_title)}.json",
+                    mime="application/json",
+                    on_click="ignore",
+                )
+            except KeyError:
+                logging.exception("Missing media key when creating quiz download button")
+                st.error("Файл временно недоступен. Пожалуйста, перезагрузите страницу и повторите попытку.")
+            except Exception:
+                logging.exception("Error while creating quiz download button")
+                st.error("Не удалось подготовить файл для скачивания. Попробуйте ещё раз.")
 
     # Подсказка: быстрый поиск и просмотр материалов (как дополнительный блок)
     with st.expander("Поиск по материалам / AI-помощник"):
@@ -1462,12 +1747,20 @@ elif app_mode == "Админ-панель":
                 st.caption(f"Темы: {m.topics or '—'}")
                 if m.path and Path(m.path).exists():
                     with open(m.path, "rb") as fh:
-                        st.download_button(
-                            label="Скачать файл",
-                            data=fh.read(),
-                            file_name=Path(m.path).name,
-                            key=f"material_download_{m.id}",
-                        )
+                        try:
+                            st.download_button(
+                                label="Скачать файл",
+                                data=fh.read(),
+                                file_name=Path(m.path).name,
+                                key=f"material_download_{m.id}",
+                                on_click="ignore",
+                            )
+                        except KeyError:
+                            logging.exception("Missing media key when creating material download button")
+                            st.error("Файл временно недоступен. Пожалуйста, перезагрузите страницу и повторите попытку.")
+                        except Exception:
+                            logging.exception("Error while creating material download button")
+                            st.error("Не удалось подготовить файл для скачивания. Попробуйте ещё раз.")
 
                 if st.button("Удалить материал", key=f"delete_material_{m.id}"):
                     if m.path and Path(m.path).exists():

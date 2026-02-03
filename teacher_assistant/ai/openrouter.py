@@ -8,6 +8,11 @@ import requests
 OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
+class PaymentRequiredError(Exception):
+    """Raised when OpenRouter returns 402 Payment Required."""
+    pass
+
+
 def build_headers(api_key: str, *, title: str = "Teacher Assistant") -> dict:
     return {
         "Authorization": f"Bearer {api_key}",
@@ -38,8 +43,44 @@ def chat_completions(
         },
         timeout=timeout,
     )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    try:
+        resp.raise_for_status()
+    except Exception as e:
+        # Если сервер вернул 402 — считаем это платёжной проблемой и поднимаем специальное исключение
+        if getattr(resp, "status_code", None) == 402:
+            try:
+                body = (resp.text or "")[:2000]
+            except Exception:
+                body = "<unreadable body>"
+            _log = f"[chat_completions] PAYMENT_REQUIRED content-type={resp.headers.get('content-type')} body_start={body!r}\n"
+            try:
+                open("openrouter_debug.log", "a", encoding="utf-8").write(_log)
+            except Exception:
+                pass
+            raise PaymentRequiredError(body)
+        try:
+            body = (resp.text or "")[:2000]
+        except Exception:
+            body = "<unreadable body>"
+        _log = f"[chat_completions] ERROR status={getattr(resp, 'status_code', '???')} content-type={resp.headers.get('content-type')} body_start={body!r}\n"
+        try:
+            open("openrouter_debug.log", "a", encoding="utf-8").write(_log)
+        except Exception:
+            pass
+        raise
+    try:
+        return resp.json()["choices"][0]["message"]["content"]
+    except Exception:
+        try:
+            body = (resp.text or "")[:2000]
+        except Exception:
+            body = "<unreadable body>"
+        _log = f"[chat_completions] PARSE_FAIL status={resp.status_code} content-type={resp.headers.get('content-type')} body_start={body!r}\n"
+        try:
+            open("openrouter_debug.log", "a", encoding="utf-8").write(_log)
+        except Exception:
+            pass
+        raise
 
 
 def stream_chat_completions(
@@ -71,7 +112,38 @@ def stream_chat_completions(
     }
 
     resp = requests.post(base_url, headers=build_headers(api_key), json=data, timeout=timeout, stream=True)
-    resp.raise_for_status()
+    # Логируем базовую информацию и ошибки для локальной отладки (не пишем ключ)
+    try:
+        status = getattr(resp, "status_code", None)
+        ctype = resp.headers.get("content-type")
+        head_log = f"[stream_chat_completions] status={status} content-type={ctype}\n"
+        open("openrouter_debug.log", "a", encoding="utf-8").write(head_log)
+    except Exception:
+        pass
+    try:
+        resp.raise_for_status()
+    except Exception as e:
+        if getattr(resp, "status_code", None) == 402:
+            try:
+                body = (resp.text or "")[:2000]
+            except Exception:
+                body = "<unreadable body>"
+            _log = f"[stream_chat_completions] PAYMENT_REQUIRED content-type={resp.headers.get('content-type')} body_start={body!r}\n"
+            try:
+                open("openrouter_debug.log", "a", encoding="utf-8").write(_log)
+            except Exception:
+                pass
+            raise PaymentRequiredError(body)
+        try:
+            body = (resp.text or "")[:2000]
+        except Exception:
+            body = "<unreadable body>"
+        _log = f"[stream_chat_completions] ERROR status={getattr(resp, 'status_code', '???')} content-type={resp.headers.get('content-type')} body_start={body!r}\n"
+        try:
+            open("openrouter_debug.log", "a", encoding="utf-8").write(_log)
+        except Exception:
+            pass
+        raise
 
     # Принудительно декодируем как UTF-8 — предотвращает mojibake.
     resp.encoding = "utf-8"
