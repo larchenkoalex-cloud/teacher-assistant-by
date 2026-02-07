@@ -91,7 +91,7 @@ def generate_with_deepseek(api_key: str, prompt: str, model: str = "deepseek/dee
     return {"error": str(last_exc), "choices": [{"message": {"content": f"Ошибка: {last_exc}"}}]}
 
 
-IS_DEV_ADMIN = True  # в режиме разработки считаем текущего пользователя администратором
+IS_DEV_ADMIN = False  # выключаем режим разработки по умолчанию
 
 SUBJECTS = [
     "Математика",
@@ -211,139 +211,193 @@ init_db()
 st.title("Твой ассистет — помощник для учителя")
 st.markdown("Используйте форму слева для генерации плана урока и предпросмотр справа для правок.")
 
-# Sidebar settings header
-st.sidebar.header("Настройки DeepSeek (OpenRouter)")
+# Переключение между пользовательским режимом и админ-панелью
+if "is_admin_user" not in st.session_state:
+    st.session_state["is_admin_user"] = False
 
-# Читаем ключ OpenRouter (не DeepSeek напрямую!)
-_secrets_key = None
-try:
-    _secrets_key = st.secrets.get("OPENROUTER_API_KEY")  # Изменили имя!
-except Exception:
-    _secrets_key = None
-_env_key = os.getenv("OPENROUTER_API_KEY")  # Изменили имя!
 
-api_key_input = st.sidebar.text_input("OpenRouter API key", type="password", 
-                                      help="Ключ начинается с sk-or-v1-...")
-api_key = _secrets_key or _env_key or api_key_input
+def _has_admin_access() -> bool:
+    """Лёгкая проверка админ-доступа на ранней стадии рендера.
 
-# Нормализуем: часто при копипасте добавляются пробелы/кавычки
-try:
-    api_key = (api_key or "").strip().strip('"').strip("'")
-except Exception:
-    pass
-if not api_key:
-    api_key = None
+    Нельзя вызывать is_admin() здесь, потому что она объявлена ниже по файлу.
+    """
 
-try:
-    # Сохраняем в session_state, чтобы другие блоки (inline AI и пр.) могли читать ключ
-    st.session_state["api_key"] = api_key
-except Exception:
-    pass
+    if IS_DEV_ADMIN:
+        return True
+    try:
+        return bool(st.session_state.get("is_admin_user"))
+    except Exception:
+        return False
 
-# Фиксированный URL для OpenRouter (не настраиваемый)
-DEEPSEEK_API_BASE = "https://openrouter.ai/api/v1/chat/completions"
 
-# (debug lines removed)
+app_mode = st.sidebar.radio("Режим", ["Пользовательский режим", "Админ-панель"], key="app_mode")
 
-# Показываем источник ключа
-if api_key:
-    if _secrets_key and api_key == _secrets_key:
-        api_key_source = "st.secrets"
-    elif _env_key and api_key == _env_key:
-        api_key_source = "env"
-    elif api_key_input and api_key == api_key_input:
-        api_key_source = "sidebar"
-    else:
-        api_key_source = "unknown"
-    st.sidebar.success(f"✅ Ключ загружен ({api_key_source})")
-else:
-    st.sidebar.warning("⚠️ Ключ OpenRouter не задан")
 
-show_deepseek_debug = st.sidebar.checkbox("Показывать отладку API", value=False)
+def _get_admin_password() -> str:
+    """Возвращает пароль админа из secrets/env, либо дефолт.
 
-if show_deepseek_debug:
-    # Показываем «отпечаток» ключа (без раскрытия полного значения)
-    if api_key:
-        try:
-            key_len = len(api_key)
-            key_prefix = api_key[:10]
-            key_tail = api_key[-6:]
-            st.sidebar.caption(
-                f"Ключ: len={key_len}, prefix={key_prefix}…, tail=…{key_tail}, source={api_key_source}"
-            )
-            if not api_key.startswith("sk-or-v1-"):
-                st.sidebar.warning("Похоже, это не OpenRouter ключ. Нужен формат sk-or-v1-…")
-            if api_key_source in {"st.secrets", "env"} and api_key_input:
-                st.sidebar.info(
-                    "Введённый ключ в сайдбаре сейчас НЕ используется (приоритет у secrets/env). "
-                    "Очистите env/secrets или задайте правильный ключ там."
-                )
-        except Exception:
-            pass
+    Важно: дефолт удобен для локальной разработки, но для продакшена
+    лучше задать ADMIN_PASSWORD в st.secrets или переменных окружения.
+    """
 
     try:
-        with open("openrouter_debug.log", "r", encoding="utf-8") as fh:
-            lines = fh.readlines()
-        tail = "".join(lines[-80:])
-        st.sidebar.caption("openrouter_debug.log (последние строки)")
-        st.sidebar.code(tail or "(пока пусто)")
-    except FileNotFoundError:
-        st.sidebar.caption("openrouter_debug.log ещё не создан")
-    except Exception as e:
-        st.sidebar.caption(f"Не удалось прочитать openrouter_debug.log: {e}")
+        pw = st.secrets.get("ADMIN_PASSWORD")
+    except Exception:
+        pw = None
+    pw = pw or os.getenv("ADMIN_PASSWORD") or "adminstan"
+    return str(pw)
 
-# Опция показа последних планов (по умолчанию скрыта)
-show_recent_plans = st.sidebar.checkbox("Показывать последние сохранённые планы", value=False)
 
-# Кнопка проверки подключения
-if st.sidebar.button("Проверить подключение к API"):
+# Защита: админ-панель открывается только после ввода пароля
+if app_mode == "Админ-панель" and not _has_admin_access():
+    st.sidebar.warning("Для доступа к админ-панели нужен пароль.")
+    admin_pw_input = st.sidebar.text_input("Пароль админа", type="password", key="admin_pw_input")
+    if st.sidebar.button("Войти в админ-панель", key="admin_login_btn"):
+        if admin_pw_input and admin_pw_input == _get_admin_password():
+            st.session_state["is_admin_user"] = True
+            st.sidebar.success("Админ-доступ получен")
+            safe_rerun()
+            st.stop()
+        st.sidebar.error("Неверный пароль")
+
+    # Не продолжаем отрисовку приложения в админ-режиме
+    st.stop()
+
+# Sidebar: показываем настройки DeepSeek только в админ-панели и только после входа
+if app_mode == "Админ-панель" and _has_admin_access():
+    st.sidebar.header("Настройки DeepSeek (OpenRouter)")
+
+    # Читаем ключ OpenRouter (не DeepSeek напрямую!)
+    _secrets_key = None
+    try:
+        _secrets_key = st.secrets.get("OPENROUTER_API_KEY")  # Изменили имя!
+    except Exception:
+        _secrets_key = None
+    _env_key = os.getenv("OPENROUTER_API_KEY")  # Изменили имя!
+
+    api_key_input = st.sidebar.text_input("OpenRouter API key", type="password", 
+                                          help="Ключ начинается с sk-or-v1-...")
+    api_key = _secrets_key or _env_key or api_key_input
+
+    # Нормализуем: часто при копипасте добавляются пробелы/кавычки
+    try:
+        api_key = (api_key or "").strip().strip('"').strip("'")
+    except Exception:
+        pass
     if not api_key:
-        st.sidebar.error("Сначала введите API ключ")
+        api_key = None
+
+    try:
+        # Сохраняем в session_state, чтобы другие блоки (inline AI и пр.) могли читать ключ
+        st.session_state["api_key"] = api_key
+    except Exception:
+        pass
+
+    # Фиксированный URL для OpenRouter (не настраиваемый)
+    DEEPSEEK_API_BASE = "https://openrouter.ai/api/v1/chat/completions"
+
+    # Показываем источник ключа
+    if api_key:
+        if _secrets_key and api_key == _secrets_key:
+            api_key_source = "st.secrets"
+        elif _env_key and api_key == _env_key:
+            api_key_source = "env"
+        elif api_key_input and api_key == api_key_input:
+            api_key_source = "sidebar"
+        else:
+            api_key_source = "unknown"
+        st.sidebar.success(f"✅ Ключ загружен ({api_key_source})")
     else:
-        with st.sidebar.spinner("Проверяем..."):
+        st.sidebar.warning("⚠️ Ключ OpenRouter не задан")
+
+    show_deepseek_debug = st.sidebar.checkbox("Показывать отладку API", value=False)
+
+    if show_deepseek_debug:
+        # Показываем «отпечаток» ключа (без раскрытия полного значения)
+        if api_key:
             try:
-                response = requests.post(
-                    DEEPSEEK_API_BASE,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://teacher-assistant.streamlit.app",
-                        "X-Title": "Teacher Assistant",
-                    },
-                    json={
-                        "model": "deepseek/deepseek-chat",
-                        "messages": [{"role": "user", "content": "Ответь 'OK'"}],
-                        "max_tokens": 10
-                    },
-                    timeout=10
+                key_len = len(api_key)
+                key_prefix = api_key[:10]
+                key_tail = api_key[-6:]
+                st.sidebar.caption(
+                    f"Ключ: len={key_len}, prefix={key_prefix}…, tail=…{key_tail}, source={api_key_source}"
                 )
-                if response.status_code == 200:
-                    st.sidebar.success("✅ API работает!")
-                elif response.status_code == 401:
-                    st.sidebar.error("❌ 401 Unauthorized: неверный OpenRouter API key (нужен sk-or-v1-…).")
-                    try:
-                        open("openrouter_debug.log", "a", encoding="utf-8").write(
-                            f"[check_api] 401 unauthorized; key_source={api_key_source}\n"
-                        )
-                    except Exception:
-                        pass
-                else:
-                    st.sidebar.error(f"❌ Ошибка API: {response.status_code}")
-                    if show_deepseek_debug:
+                if not api_key.startswith("sk-or-v1-"):
+                    st.sidebar.warning("Похоже, это не OpenRouter ключ. Нужен формат sk-or-v1-…")
+                if api_key_source in {"st.secrets", "env"} and api_key_input:
+                    st.sidebar.info(
+                        "Введённый ключ в сайдбаре сейчас НЕ используется (приоритет у secrets/env). "
+                        "Очистите env/secrets или задайте правильный ключ там."
+                    )
+            except Exception:
+                pass
+
+        try:
+            with open("openrouter_debug.log", "r", encoding="utf-8") as fh:
+                lines = fh.readlines()
+            tail = "".join(lines[-80:])
+            st.sidebar.caption("openrouter_debug.log (последние строки)")
+            st.sidebar.code(tail or "(пока пусто)")
+        except FileNotFoundError:
+            st.sidebar.caption("openrouter_debug.log ещё не создан")
+        except Exception as e:
+            st.sidebar.caption(f"Не удалось прочитать openrouter_debug.log: {e}")
+
+    # Кнопка проверки подключения
+    if st.sidebar.button("Проверить подключение к API"):
+        if not api_key:
+            st.sidebar.error("Сначала введите API ключ")
+        else:
+            with st.sidebar.spinner("Проверяем..."):
+                try:
+                    response = requests.post(
+                        DEEPSEEK_API_BASE,
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                            "HTTP-Referer": "https://teacher-assistant.streamlit.app",
+                            "X-Title": "Teacher Assistant",
+                        },
+                        json={
+                            "model": "deepseek/deepseek-chat",
+                            "messages": [{"role": "user", "content": "Ответь 'OK'"}],
+                            "max_tokens": 10
+                        },
+                        timeout=10
+                    )
+                    if response.status_code == 200:
+                        st.sidebar.success("✅ API работает!")
+                    elif response.status_code == 401:
+                        st.sidebar.error("❌ 401 Unauthorized: неверный OpenRouter API key (нужен sk-or-v1-…).")
                         try:
-                            st.sidebar.code((response.text or "")[:2000])
+                            open("openrouter_debug.log", "a", encoding="utf-8").write(
+                                f"[check_api] 401 unauthorized; key_source={api_key_source}\n"
+                            )
                         except Exception:
                             pass
-            except Exception as e:
-                st.sidebar.error(f"❌ Ошибка: {e}")
+                    else:
+                        st.sidebar.error(f"❌ Ошибка API: {response.status_code}")
+                        if show_deepseek_debug:
+                            try:
+                                st.sidebar.code((response.text or "")[:2000])
+                            except Exception:
+                                pass
+                except Exception as e:
+                    st.sidebar.error(f"❌ Ошибка: {e}")
 
-# Переключение между пользовательским режимом и админ-панелью
-app_mode = st.sidebar.radio("Режим", ["Пользовательский режим", "Админ-панель"])
+
+# Опция показа последних планов (по умолчанию скрыта)
+show_recent_plans = st.sidebar.checkbox(
+    "Показывать последние сохранённые планы",
+    value=False,
+    key="show_recent_plans",
+)
 
 # --- Простая аутентификация для педагогов (регистрация / вход)
 if "user_id" not in st.session_state:
     st.session_state["user_id"] = None
     st.session_state["username"] = None
+    st.session_state["is_admin_user"] = False
 
 auth_mode = st.sidebar.selectbox("Аккаунт", ["Войти", "Регистрация", "Профиль"])
 if auth_mode == "Регистрация":
@@ -355,6 +409,8 @@ if auth_mode == "Регистрация":
         if st.form_submit_button("Зарегистрироваться"):
             if not reg_username or not reg_password:
                 st.sidebar.warning("Укажите логин и пароль.")
+            elif (reg_username or "").strip().lower() == "admin":
+                st.sidebar.warning("Логин 'admin' зарезервирован для админ-панели.")
             elif reg_password != reg_password2:
                 st.sidebar.warning("Пароли не совпадают.")
             elif get_user_by_username(reg_username):
@@ -371,19 +427,34 @@ elif auth_mode == "Войти":
         login_username = st.text_input("Логин")
         login_password = st.text_input("Пароль", type="password")
         if st.form_submit_button("Войти"):
-            user = get_user_by_username(login_username)
-            if not user:
-                st.sidebar.error("Пользователь не найден.")
+            # Вход в админ-панель по паролю. Пароль берётся из st.secrets.ADMIN_PASSWORD,
+            # затем из env ADMIN_PASSWORD, иначе используется дефолт 'adminstan'.
+            try:
+                admin_pass = st.secrets.get("ADMIN_PASSWORD")
+            except Exception:
+                admin_pass = None
+            if not admin_pass:
+                admin_pass = os.getenv("ADMIN_PASSWORD") or "adminstan"
+
+            if login_username == "admin" and login_password and login_password == admin_pass:
+                st.session_state["user_id"] = 0
+                st.session_state["username"] = "admin"
+                st.session_state["is_admin_user"] = True
+                st.sidebar.success("Вы вошли как admin (админ)")
             else:
-                try:
-                    if bcrypt.verify(login_password, user.password_hash):
-                        st.session_state["user_id"] = user.id
-                        st.session_state["username"] = user.username
-                        st.sidebar.success(f"Вы вошли как {user.username}")
-                    else:
-                        st.sidebar.error("Неверный пароль.")
-                except Exception:
-                    st.sidebar.error("Ошибка проверки пароля.")
+                user = get_user_by_username(login_username)
+                if not user:
+                    st.sidebar.error("Пользователь не найден.")
+                else:
+                    try:
+                        if bcrypt.verify(login_password, user.password_hash):
+                            st.session_state["user_id"] = user.id
+                            st.session_state["username"] = user.username
+                            st.sidebar.success(f"Вы вошли как {user.username}")
+                        else:
+                            st.sidebar.error("Неверный пароль.")
+                    except Exception:
+                        st.sidebar.error("Ошибка проверки пароля.")
 
 else:  # Профиль
     if st.session_state.get("user_id"):
@@ -391,6 +462,7 @@ else:  # Профиль
         if st.sidebar.button("Выйти"):
             st.session_state["user_id"] = None
             st.session_state["username"] = None
+            st.session_state["is_admin_user"] = False
             st.sidebar.success("Вы вышли.")
     else:
         st.sidebar.info("Войдите или зарегистрируйтесь, чтобы публиковать материалы.")
@@ -480,7 +552,7 @@ def stream_generate_chat_via_api(*, messages: list, headers: dict, placeholder, 
 
 
 def is_admin() -> bool:
-    """Проверка, является ли текущий пользователь администратором.
+    """Проверка, является ли текущим пользователем администратором.
 
     В режиме разработки (IS_DEV_ADMIN=True) всегда возвращает True,
     чтобы упростить локальную работу.
@@ -488,6 +560,12 @@ def is_admin() -> bool:
 
     if IS_DEV_ADMIN:
         return True
+    # Админ определяется флагом сессии (вход по паролю ставит флаг `is_admin_user`)
+    try:
+        if st.session_state.get("is_admin_user"):
+            return True
+    except Exception:
+        pass
     if current_user and getattr(current_user, "role", "user") == "admin":
         return True
     return False
@@ -1040,7 +1118,7 @@ with col_form:
 
         api_key_local = st.session_state.get("api_key") or os.getenv("OPENROUTER_API_KEY")
         if not api_key_local:
-            st.error("Укажите OpenRouter API key в сайдбаре (sk-or-v1-...).")
+            st.error("Укажите OpenRouter API key в админ-панели (sk-or-v1-...).")
             return
 
         headers_local = _build_openrouter_headers(api_key_local)
@@ -1100,7 +1178,7 @@ with col_form:
             st.warning("Укажите хотя бы предмет и тему урока.")
         elif model_choice == "Deepseek API (через ключ)":
             if not api_key:
-                st.error("Укажите OpenRouter API key в сайдбаре (sk-or-v1-...).")
+                st.error("Укажите OpenRouter API key в админ-панели (sk-or-v1-...).")
             else:
                 headers = _build_openrouter_headers(api_key)
                 messages = _build_lesson_plan_messages(
@@ -1699,6 +1777,7 @@ if app_mode == "Пользовательский режим":
                 default=[],
                 key="handout_elements",
                 on_change=_handout_inputs_changed,
+                placeholder="выберите дополнительные параметры",
             )
 
         # Правый столбец: режим работы, сложность и поле заметок
@@ -1786,7 +1865,7 @@ if app_mode == "Пользовательский режим":
         if gen_cols[0].button("Сгенерировать раздаточный материал (ИИ)", key="handout_generate_btn"):
             api_key_local = st.session_state.get("api_key") or os.getenv("OPENROUTER_API_KEY")
             if not api_key_local:
-                st.error("Укажите OpenRouter API key в сайдбаре (sk-or-v1-...).")
+                st.error("Укажите OpenRouter API key в админ-панели (sk-or-v1-...).")
             elif not (handout_topic or "").strip():
                 st.warning("Заполните тему раздаточного материала.")
             else:
@@ -1893,6 +1972,14 @@ if app_mode == "Пользовательский режим":
             or (st.session_state.get("gen_topic") or "").strip()
         )
 
+        # Авто-обновление названия викторины при изменении темы,
+        # если пользователь не редактировал поле `quiz_title` вручную.
+        if "quiz_title_autofill" not in st.session_state:
+            st.session_state["quiz_title_autofill"] = True
+        # Если автозаполнение включено — синхронизируем значение в session_state
+        if st.session_state.get("quiz_title_autofill"):
+            st.session_state["quiz_title"] = quiz_topic or "Викторина"
+
         st.caption(
             f"Используем для викторины: {quiz_subject} • {quiz_grade} • Тема: {quiz_topic or '—'}"
         )
@@ -1900,9 +1987,9 @@ if app_mode == "Пользовательский режим":
         params_cols = st.columns([2, 1, 2])
         quiz_title = params_cols[0].text_input(
             "Название викторины",
-            value=(quiz_topic or "Викторина"),
+            value=st.session_state.get("quiz_title", (quiz_topic or "Викторина")),
             key="quiz_title",
-            on_change=_quiz_params_changed,
+            on_change=lambda: (st.session_state.__setitem__("quiz_title_autofill", False), _quiz_params_changed()),
         )
         quiz_num_questions = params_cols[1].slider(
             "Вопросов",
@@ -2014,7 +2101,7 @@ if app_mode == "Пользовательский режим":
         if gen_cols[0].button("Сгенерировать викторину (ИИ)", key="quiz_generate_btn"):
             api_key_local = st.session_state.get("api_key") or os.getenv("OPENROUTER_API_KEY")
             if not api_key_local:
-                st.error("Укажите OpenRouter API key в сайдбаре (sk-or-v1-...).")
+                st.error("Укажите OpenRouter API key в админ-панели (sk-or-v1-...).")
             elif not quiz_topic:
                 st.warning("Сначала задайте тему (в форме плана урока).")
             else:
@@ -2166,18 +2253,7 @@ if app_mode == "Пользовательский режим":
                 except Exception:
                     st.warning("Не удалось сформировать превью викторины. Откройте JSON в экспандере для отладки.")
 
-                with st.expander("Показать / править JSON (отладка)", expanded=False):
-                    # Внутри экспандера даём текстовый редактор для корректировок
-                    st.session_state["quiz_generated_json_text"] = st.text_area(
-                        "quiz_generated_json_editor",
-                        value=st.session_state["quiz_generated_json_text"],
-                        height=320,
-                        label_visibility="collapsed",
-                    )
-                    try:
-                        st.json(json.loads(st.session_state["quiz_generated_json_text"]))
-                    except Exception:
-                        st.warning("Текущий JSON некорректен.")
+                # Экспандер для просмотра/правки JSON скрыт по умолчанию (отладка удалена).
             else:
                 # Некорректный JSON — показываем редактор сразу и предупреждение
                 st.markdown("### Результат (JSON — ошибка парсинга)")
@@ -2215,29 +2291,7 @@ if app_mode == "Пользовательский режим":
                     logging.exception("Error while converting quiz to docx")
                     st.error(f"Не удалось собрать .docx: {e}")
 
-        st.markdown("---")
-        st.markdown("### Пустой шаблон (если хотите заполнить вручную)")
-        num_q_tpl = st.number_input("Число вопросов (шаблон)", min_value=1, max_value=50, value=10, key="quiz_tpl_num_q")
-        quiz_tpl = {
-            "title": quiz_title or "Викторина",
-            "subject": quiz_subject,
-            "grade": quiz_grade,
-            "topic": quiz_topic,
-            "difficulty": quiz_difficulty,
-            "time_minutes": int(quiz_time_min),
-            "questions": [
-                {"id": i + 1, "type": "single_choice", "question": "", "choices": ["", "", "", ""], "answer": 0, "explanation": "", "points": 1}
-                for i in range(int(num_q_tpl))
-            ],
-        }
-        st.download_button(
-            "Скачать пустой шаблон (.json)",
-            data=json.dumps(quiz_tpl, ensure_ascii=False, indent=2).encode("utf-8"),
-            file_name=f"{_slugify(quiz_title or 'quiz')}_template.json",
-            mime="application/json",
-            on_click="ignore",
-            key="quiz_download_template_btn",
-        )
+        # Пустой шаблон для ручного заполнения удалён по просьбе пользователя.
 
     # Подсказка: быстрый поиск и просмотр материалов (как дополнительный блок)
     with st.expander("Поиск по материалам / AI-помощник"):
@@ -2456,5 +2510,5 @@ elif app_mode == "Админ-панель":
 
 st.caption(
     "Версия с генерацией планов уроков, базовой аутентификацией и загрузкой материалов. "
-    "Далее можно добавить модерацию, публичный каталог и интеграцию с Deepseek/GPT API.",
+    "",
 )
