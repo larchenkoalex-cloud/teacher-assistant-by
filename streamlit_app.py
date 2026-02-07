@@ -100,7 +100,6 @@ SUBJECTS = [
     "Музыка",
     "Белорусский язык",
     "Английский язык",
-    "Иностранный язык (английский)",
     "Информатика",
     "Физика",
     "Химия",
@@ -1071,7 +1070,6 @@ with col_form:
                 if st.button(t, key=f"suggest_topic_{i}"):
                     st.session_state["gen_topic"] = t
                     safe_rerun()
-                    st.stop()
 
         # Подсказки конкретно из календарно-тематического планирования (KTP)
         try:
@@ -1088,7 +1086,6 @@ with col_form:
                     st.session_state["gen_topic"] = t
                     st.success("Тема взята из календарно‑тематического планирования.")
                     safe_rerun()
-                    st.stop()
 
     # Проверяем, есть ли уже материал в предпросмотре
     existing_preview = bool(
@@ -1576,7 +1573,6 @@ with col_editor:
                                 st.session_state["preview_fill_widgets"] = {"src": sel_text, "res": ai_text}
 
                                 safe_rerun()
-                                st.stop()
 
         # Редакторные блоки (Quill/streamlit-quill и их отладка) удалены.
 
@@ -1644,7 +1640,6 @@ with col_editor:
             st.session_state["preview_html"] = ""
             st.session_state["preview_apply_replace"] = None
             safe_rerun()
-            st.stop()
 
         # Примечание: раньше тут был режим «вставьте выделенный текст». Теперь основная замена
         # делается прямо в редакторе через ПКМ (см. блок выше).
@@ -1690,7 +1685,9 @@ if show_recent_plans:
 if app_mode == "Пользовательский режим":
     st.header("Дополнительный материал для урока")
 
-    tab_handout, tab_concept, tab_quiz = st.tabs(["Раздаточный материал", "Конспект", "Викторина"])
+    tab_handout, tab_quiz, tab_talk, tab_concept = st.tabs(
+        ["Раздаточный материал", "Викторина", "Беседа", "Конспект"]
+    )
 
     # ----- Вкладка: Конспект (текущая работа с планом) -----
     with tab_concept:
@@ -2122,7 +2119,25 @@ if app_mode == "Пользовательский режим":
                     m = re.search(r"\{.*\}", t, flags=re.S)
                     return (m.group(0) if m else t).strip()
 
-                st.session_state["quiz_generated_json_text"] = _extract_json(raw)
+                extracted = _extract_json(raw)
+                # Попытка получить валидный JSON. Если AI вернул python-словарь
+                # с одинарными кавычками, пробуем ast.literal_eval как запасной вариант.
+                pretty = extracted
+                try:
+                    parsed = json.loads(extracted)
+                    pretty = json.dumps(parsed, ensure_ascii=False, indent=2)
+                except Exception:
+                    try:
+                        import ast
+
+                        parsed = ast.literal_eval(extracted)
+                        # Конвертируем в корректный JSON-строковый формат
+                        pretty = json.dumps(parsed, ensure_ascii=False, indent=2)
+                    except Exception:
+                        # Оставляем оригинальный извлечённый текст для ручной правки
+                        pretty = extracted
+
+                st.session_state["quiz_generated_json_text"] = pretty
 
         if gen_cols[1].button("Очистить", key="quiz_clear_btn"):
             st.session_state["quiz_generated_json_text"] = ""
@@ -2291,6 +2306,269 @@ if app_mode == "Пользовательский режим":
 
         # Пустой шаблон для ручного заполнения удалён по просьбе пользователя.
 
+        # ----- Вкладка: Беседа -----
+        with tab_talk:
+            st.subheader("Беседа (ИИ)")
+
+            def _talk_params_changed():
+                st.session_state["talk_generated_md"] = ""
+                st.session_state["talk_prompt_autofill"] = True
+
+            # Берём тему и класс из верхней формы плана урока
+            talk_subject = st.session_state.get("gen_subject") or st.session_state.get("handout_subject") or SUBJECTS[0]
+            talk_grade = st.session_state.get("gen_grade") or st.session_state.get("handout_grade") or GRADES[0]
+            talk_topic = (st.session_state.get("gen_topic") or "").strip()
+
+            st.caption(f"Используем: {talk_subject} • {talk_grade} • Тема: {talk_topic or '—'}")
+
+            left, right = st.columns(2)
+
+            with left:
+                talk_goal = st.selectbox(
+                    "Цель и педагогический фокус",
+                    [
+                        "—",
+                        "Знакомство с темой (первичное информирование).",
+                        "Воспитательный момент (формирование ценностей: доброта, уважение к истории, экологичность).",
+                        "Интерактив и вовлечение (чтобы дети больше говорили и делали).",
+                        "Эмоциональный отклик (вызвать удивление, радость, сопереживание).",
+                        "Практический навык (научиться чему-то простому за время беседы).",
+                        "Подготовка к проекту (беседа как вводная часть для дальнейшей работы).",
+                    ],
+                    index=0,
+                    key="talk_goal",
+                    on_change=_talk_params_changed,
+                )
+
+                talk_format = st.selectbox(
+                    "Формат и методы",
+                    [
+                        "—",
+                        "Монолог-рассказ учителя с элементами вопросов.",
+                        "Эвристическая беседа (учитель задает наводящие вопросы, дети сами приходят к выводам).",
+                        "Беседа с опорой на наглядность (укажите, если у вас есть конкретные картинки, предметы, презентация).",
+                        "Беседа-игра (с загадками, физкультминуткой, ролевыми элементами).",
+                        "Круглый стол / обсуждение (для старших классов).",
+                    ],
+                    index=0,
+                    key="talk_format",
+                    on_change=_talk_params_changed,
+                )
+
+                talk_elements = st.multiselect(
+                    "Конкретные элементы, которые нужно включить",
+                    [
+                        "Ключевые термины или имена",
+                        "Один конкретный факт или история",
+                        "Связь с местным контекстом",
+                        "Стихотворение, короткая песня, пословица",
+                        "Вопросы к аудитории",
+                    ],
+                    default=[],
+                    key="talk_elements",
+                    on_change=_talk_params_changed,
+                    placeholder="Выберите параметры",
+                )
+
+            with right:
+                talk_time_min = st.slider(
+                    "Время беседы (мин)",
+                    min_value=5,
+                    max_value=40,
+                    value=int(st.session_state.get("talk_time_min", 15) or 15),
+                    step=5,
+                    key="talk_time_min",
+                    on_change=_talk_params_changed,
+                )
+
+                talk_integration = st.multiselect(
+                    "Интеграция с другими предметами (межпредметные связи)",
+                    [
+                        "Чтение (сказка, миф, отрывок из произведения).",
+                        "Музыка (песня, звуки природы).",
+                        "ИЗО (рассматривание репродукции, описание картины).",
+                        "Окружающий мир / история (исторический контекст, природные явления).",
+                        "Технология (поделка, которую можно сделать после).",
+                    ],
+                    default=[],
+                    key="talk_integration",
+                    on_change=_talk_params_changed,
+                    placeholder="Выберите параметры",
+                )
+
+                talk_audience = st.selectbox(
+                    "Особенности аудитории",
+                    [
+                        "—",
+                        "Уровень подготовки класса (высокий, средний, есть ли дети, для которых русский не родной).",
+                        "Особые образовательные потребности",
+                        "Особый интерес класса",
+                    ],
+                    index=0,
+                    key="talk_audience",
+                    on_change=_talk_params_changed,
+                )
+
+                talk_tone = st.selectbox(
+                    "Тон общения",
+                    [
+                        "—",
+                        "Доброжелательный",
+                        "Сказочный",
+                        "Научно-популярный",
+                        "Доверительный",
+                        "Энергичный",
+                    ],
+                    index=0,
+                    key="talk_tone",
+                    on_change=_talk_params_changed,
+                )
+
+            # Авто-промпт для беседы
+            def _as_opt(v: str) -> str:
+                v = (v or "").strip()
+                return "" if v == "—" else v
+
+            goal_txt = _as_opt(st.session_state.get("talk_goal", ""))
+            format_txt = _as_opt(st.session_state.get("talk_format", ""))
+            audience_txt = _as_opt(st.session_state.get("talk_audience", ""))
+            tone_txt = _as_opt(st.session_state.get("talk_tone", ""))
+
+            elements_txt = ", ".join(st.session_state.get("talk_elements") or [])
+            integration_txt = ", ".join(st.session_state.get("talk_integration") or [])
+            minutes = int(st.session_state.get("talk_time_min") or 15)
+
+            auto_prompt = (
+                "Ты — опытный учитель и педагог. Подготовь сценарий беседы для обсуждения с детьми по теме урока.\n\n"
+                f"Предмет: {talk_subject}.\n"
+                f"Класс: {talk_grade}.\n"
+                "ТЕМА (главная):\n"
+                f"\"\"\"\n{talk_topic or '(тема не указана)'}\n\"\"\"\n"
+                f"Длительность беседы: ~{minutes} минут.\n\n"
+            )
+            if goal_txt:
+                auto_prompt += f"Цель и педагогический фокус: {goal_txt}\n"
+            if format_txt:
+                auto_prompt += f"Формат и методы: {format_txt}\n"
+            if elements_txt:
+                auto_prompt += f"Обязательно включить элементы: {elements_txt}.\n"
+            if integration_txt:
+                auto_prompt += f"Межпредметные связи: {integration_txt}.\n"
+            if audience_txt:
+                auto_prompt += f"Особенности аудитории: {audience_txt}\n"
+            if tone_txt:
+                auto_prompt += f"Тон общения: {tone_txt}.\n"
+
+            auto_prompt += (
+                "\nТребования к результату:\n"
+                "- Соответствуй возрасту/классу; без спорных/взрослых тем.\n"
+                "- Структура: 1) Вступление (1–2 мин) 2) Рассказ/сюжет 3) Вопросы и наводящие реплики 4) Мини-активность 5) Итог.\n"
+                "- Дай текст учителя и вопросы к классу (чтобы дети больше говорили).\n"
+                "- Язык простой, живой; без воды.\n"
+                "\nВывод: строго в Markdown (без HTML). Не пиши рассуждений — только готовый сценарий беседы.\n"
+            )
+
+            st.session_state.setdefault("talk_prompt_autofill", True)
+            if st.session_state.get("talk_prompt_autofill"):
+                st.session_state["talk_prompt_editor"] = auto_prompt
+
+            with st.expander("Шаблон для генерации (можно править)", expanded=False):
+                prompt_cols = st.columns([1, 3])
+                if prompt_cols[0].button("Сбросить к авто", key="talk_prompt_reset_btn"):
+                    st.session_state["talk_prompt_autofill"] = True
+                    st.session_state["talk_prompt_editor"] = auto_prompt
+
+                st.text_area(
+                    "Промпт",
+                    height=240,
+                    key="talk_prompt_editor",
+                    on_change=lambda: st.session_state.__setitem__("talk_prompt_autofill", False),
+                )
+
+            st.session_state.setdefault("talk_generated_md", "")
+            gen_cols = st.columns([1, 1, 2])
+            if gen_cols[0].button("Сгенерировать беседу (ИИ)", key="talk_generate_btn"):
+                api_key_local = st.session_state.get("api_key") or os.getenv("OPENROUTER_API_KEY")
+                if not api_key_local:
+                    st.error("Укажите OpenRouter API key в админ-панели (sk-or-v1-...).")
+                elif not talk_topic:
+                    st.warning("Сначала задайте тему (в форме плана урока сверху).")
+                else:
+                    prompt_text = (st.session_state.get("talk_prompt_editor") or auto_prompt).strip()
+                    with st.spinner("Генерирую беседу..."):
+                        resp = generate_with_deepseek(api_key_local, prompt_text)
+                    text = (
+                        resp.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+                    st.session_state["talk_generated_md"] = (text or "").strip()
+
+            if gen_cols[1].button("Очистить", key="talk_clear_btn"):
+                st.session_state["talk_generated_md"] = ""
+
+            if (st.session_state.get("talk_generated_md") or "").strip():
+                st.markdown("### Результат (можно править)")
+                st.session_state["talk_generated_md"] = st.text_area(
+                    "talk_generated_md_editor",
+                    value=st.session_state["talk_generated_md"],
+                    height=360,
+                    label_visibility="collapsed",
+                )
+
+                # Сохранение результата в .docx
+                try:
+                    talk_docx_title = _normalize_material_filename(
+                        grade=talk_grade,
+                        kind="беседа",
+                        topic=talk_topic or "беседа",
+                        ext="docx",
+                    )
+
+                    src_md = st.session_state.get("talk_generated_md") or ""
+                    md_norm = normalize_ai_markdown(_postprocess_plan_text(src_md))
+                    html_for_docx = quill_html_utils.sanitize_html_for_quill(
+                        markdown_to_html(md_norm)
+                    )
+                    bytes_docx = _html_to_docx_bytes(html_for_docx)
+
+                    btn_cols = st.columns([1, 1, 2])
+                    try:
+                        btn_cols[0].download_button(
+                            "Сохранить docx",
+                            data=bytes_docx,
+                            file_name=talk_docx_title,
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            on_click="ignore",
+                            key="talk_download_docx_btn",
+                        )
+                    except Exception:
+                        logging.exception("Error while creating download button for talk")
+                        st.error("Не удалось подготовить файл для скачивания. Попробуйте ещё раз.")
+
+                    # Кнопка для сохранения метаданных материала в БД (без пути к файлу)
+                    def _register_talk():
+                        try:
+                            create_material(
+                                filename=talk_docx_title,
+                                uploader_id=st.session_state.get("user_id"),
+                                topics=(talk_topic or "").strip() or None,
+                                path=None,
+                                subject=talk_subject,
+                                grade=talk_grade,
+                            )
+                            st.success("Беседа сохранена в базе как материал.")
+                            st.session_state["talk_last_registered"] = True
+                        except Exception:
+                            logging.exception("Error while registering talk in DB")
+                            st.error("Не удалось сохранить метаданные беседы в БД.")
+
+                    if btn_cols[1].button("Сохранить в БД", key="talk_save_db_btn"):
+                        _register_talk()
+                except Exception as e:
+                    logging.exception("Error while converting talk to docx")
+                    st.error(f"Не удалось собрать .docx: {e}")
+
     # Подсказка: быстрый поиск и просмотр материалов (как дополнительный блок)
     with st.expander("Поиск по материалам / AI-помощник"):
         query = st.text_input("Введите запрос для поиска по материалам и AI", key="search_query")
@@ -2436,7 +2714,6 @@ elif app_mode == "Админ-панель":
                     st.session_state[key_text] = ""
                     st.session_state[key_pick] = True
                     safe_rerun()
-                    st.stop()
 
                 if st.button(f"Сохранить метаданные для {f.name}"):
                     from storage import create_material
@@ -2502,11 +2779,10 @@ elif app_mode == "Админ-панель":
                     delete_material(m.id)
                     st.success("Материал удалён.")
                     safe_rerun()
-                    st.stop()
 
                 st.markdown("---")
 
 st.caption(
-    "Версия с генерацией планов уроков, базовой аутентификацией и загрузкой материалов. "
-    "",
+    "Разработано учителем информатики Ларченко А.П. ГУО 'Средняя школа №16 г. Минска'.\n"
+    "\nРабота ведётся в рамках проекта по цифровизации образовательного процесса. \n2026 год."
 )
