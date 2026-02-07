@@ -248,7 +248,9 @@ def _get_admin_password() -> str:
     return str(pw)
 
 
-# Защита: админ-панель открывается только после ввода пароля
+# Защита: админ-доступ выдаётся только после ввода пароля.
+# Важно: без st.stop/safe_rerun, чтобы не провоцировать ошибки фронтенда
+# при резкой смене дерева элементов.
 if app_mode == "Админ-панель" and not _has_admin_access():
     st.sidebar.warning("Для доступа к админ-панели нужен пароль.")
     admin_pw_input = st.sidebar.text_input("Пароль админа", type="password", key="admin_pw_input")
@@ -256,12 +258,8 @@ if app_mode == "Админ-панель" and not _has_admin_access():
         if admin_pw_input and admin_pw_input == _get_admin_password():
             st.session_state["is_admin_user"] = True
             st.sidebar.success("Админ-доступ получен")
-            safe_rerun()
-            st.stop()
-        st.sidebar.error("Неверный пароль")
-
-    # Не продолжаем отрисовку приложения в админ-режиме
-    st.stop()
+        else:
+            st.sidebar.error("Неверный пароль")
 
 # Sidebar: показываем настройки DeepSeek только в админ-панели и только после входа
 if app_mode == "Админ-панель" and _has_admin_access():
@@ -2340,7 +2338,7 @@ if app_mode == "Пользовательский режим":
 elif app_mode == "Админ-панель":
     st.header("Админ-панель")
     if not is_admin():
-        st.error("Доступ к админ-панели есть только у администратора.")
+        st.info("Введите пароль администратора в сайдбаре, чтобы открыть админ-панель.")
     else:
         st.subheader("Загрузка материалов")
         st.caption("Сначала выберите предмет и класс, затем загрузите файл КТП/материала.")
