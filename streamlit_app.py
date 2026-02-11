@@ -221,10 +221,25 @@ components.html(
             }catch(e){return null;}
         }
 
+        function injectPixel(doc){
+            if(!doc || !doc.body) return;
+            try{
+                var existing = doc.querySelector('img[src*="mc.yandex.ru/watch/' + COUNTER_ID + '"]');
+                if(existing) return;
+                var img = doc.createElement('img');
+                img.src = 'https://mc.yandex.ru/watch/' + COUNTER_ID;
+                img.style.position = 'absolute';
+                img.style.left = '-9999px';
+                img.alt = '';
+                doc.body.appendChild(img);
+            }catch(e){/* ignore */}
+        }
+
         var parentDoc = null;
         try{ parentDoc = window.parent && window.parent.document ? window.parent.document : null; }catch(e){ parentDoc = null; }
         var targetDoc = parentDoc || document;
         var scriptEl = injectToDoc(targetDoc);
+        injectPixel(targetDoc);
 
         function initYm(){
             try{
