@@ -203,19 +203,51 @@ components.html(
 # Yandex.Metrica: вставляем официальный скрипт счётчика (ID из вашего кабинета)
 components.html(
     """
-    <!-- Yandex.Metrika counter -->
-    <script type="text/javascript">
-        (function(m,e,t,r,i,k,a){
-            m[i]=m[i]||function(){(m[i].a=m[i].a||[]).push(arguments)};
-            m[i].l=1*new Date();
-            for (var j = 0; j < document.scripts.length; j++) {if (document.scripts[j].src === r) { return; }}
-            k=e.createElement(t),a=e.getElementsByTagName(t)[0],k.async=1,k.src=r,a.parentNode.insertBefore(k,a)
-        })(window, document,'script','https://mc.yandex.ru/metrika/tag.js?id=106785768', 'ym');
+    <script>
+    (function(){
+        // Попытка вставить скрипт в parent-документ, а не в iframe, чтобы счётчик работал корректно
+        var COUNTER_ID = 106785768;
+        function injectToDoc(doc){
+            if(!doc) return null;
+            try{
+                var existing = doc.querySelector('script[src*="mc.yandex.ru/metrika/tag.js?id=' + COUNTER_ID + '"]');
+                if(existing) return existing;
+                var s = doc.createElement('script');
+                s.type = 'text/javascript';
+                s.async = true;
+                s.src = 'https://mc.yandex.ru/metrika/tag.js?id=' + COUNTER_ID;
+                doc.head.appendChild(s);
+                return s;
+            }catch(e){return null;}
+        }
 
-        ym(106785768, 'init', {ssr:true, webvisor:true, clickmap:true, ecommerce:"dataLayer", referrer: document.referrer, url: location.href, accurateTrackBounce:true, trackLinks:true});
+        var parentDoc = null;
+        try{ parentDoc = window.parent && window.parent.document ? window.parent.document : null; }catch(e){ parentDoc = null; }
+        var targetDoc = parentDoc || document;
+        var scriptEl = injectToDoc(targetDoc);
+
+        function initYm(){
+            try{
+                var ymFn = (parent && parent.ym) ? parent.ym : (window.ym || null);
+                if(ymFn){
+                    try{ ymFn(COUNTER_ID, 'init', {ssr:true, webvisor:true, clickmap:true, ecommerce:"dataLayer", referrer: document.referrer, url: location.href, accurateTrackBounce:true, trackLinks:true}); }catch(e){}
+                } else {
+                    // если ym ещё не определён — отложим попытку
+                    setTimeout(initYm, 800);
+                }
+            }catch(e){/* ignore */}
+        }
+
+        if(scriptEl){
+            scriptEl.addEventListener('load', initYm);
+            setTimeout(initYm, 1500);
+        } else {
+            // Если скрипт не вставлен (например, из-за политики), попробуем инициализировать прямо
+            initYm();
+        }
+    })();
     </script>
     <noscript><div><img src="https://mc.yandex.ru/watch/106785768" style="position:absolute; left:-9999px;" alt="" /></div></noscript>
-    <!-- /Yandex.Metrika counter -->
     """,
     height=0,
     width=0,
