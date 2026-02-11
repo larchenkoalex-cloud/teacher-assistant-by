@@ -200,6 +200,27 @@ components.html(
         width=0,
 )
 
+# Yandex.Metrica: вставляем официальный скрипт счётчика (ID из вашего кабинета)
+components.html(
+    """
+    <!-- Yandex.Metrika counter -->
+    <script type="text/javascript">
+        (function(m,e,t,r,i,k,a){
+            m[i]=m[i]||function(){(m[i].a=m[i].a||[]).push(arguments)};
+            m[i].l=1*new Date();
+            for (var j = 0; j < document.scripts.length; j++) {if (document.scripts[j].src === r) { return; }}
+            k=e.createElement(t),a=e.getElementsByTagName(t)[0],k.async=1,k.src=r,a.parentNode.insertBefore(k,a)
+        })(window, document,'script','https://mc.yandex.ru/metrika/tag.js?id=106785768', 'ym');
+
+        ym(106785768, 'init', {ssr:true, webvisor:true, clickmap:true, ecommerce:"dataLayer", referrer: document.referrer, url: location.href, accurateTrackBounce:true, trackLinks:true});
+    </script>
+    <noscript><div><img src="https://mc.yandex.ru/watch/106785768" style="position:absolute; left:-9999px;" alt="" /></div></noscript>
+    <!-- /Yandex.Metrika counter -->
+    """,
+    height=0,
+    width=0,
+)
+
 # Уменьшаем левый отступ основного контейнера (чтобы сократить расстояние до сайдбара/колонки регистрации)
 # Значение уменьшено примерно вдвое относительно дефолтного.
 # Добавляем стиль для узкого окна потоковой генерации, чтобы оно было фиксировано по высоте
