@@ -9,6 +9,7 @@ from pathlib import Path
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from bs4 import BeautifulSoup, NavigableString
 import logging
 
@@ -111,7 +112,93 @@ SUBJECTS = [
 
 GRADES = [f"{i} класс" for i in range(1, 12)]
 
-st.set_page_config(page_title="Teacher Assistant", layout="wide")
+st.set_page_config(
+    page_title="Teacher Assistant",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# Streamlit может запоминать состояние сайдбара в браузере и игнорировать
+# initial_sidebar_state на следующих запусках. Этот хак пытается свернуть
+# сайдбар на старте, проверяя фактическую видимость панели.
+components.html(
+        """
+        <script>
+        (function () {
+            const collapseButtonSelectors = [
+                'button[data-testid="stSidebarCollapseButton"]',
+                'button[aria-label="Close sidebar"]',
+                'button[title="Close sidebar"]',
+                'button[aria-label="Закрыть боковую панель"]',
+                'button[title="Закрыть боковую панель"]'
+            ];
+
+            function getDoc() {
+                try {
+                    return (window.parent && window.parent.document) ? window.parent.document : document;
+                } catch (e) {
+                    return document;
+                }
+            }
+
+            function isSidebarVisible(doc) {
+                try {
+                    const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+                    if (!sidebar) return false;
+                    const rect = sidebar.getBoundingClientRect();
+                    return rect && rect.width > 40;
+                } catch (e) {
+                    return false;
+                }
+            }
+
+            function findCollapseButton(doc) {
+                for (const sel of collapseButtonSelectors) {
+                    const btn = doc.querySelector(sel);
+                    if (btn) return btn;
+                }
+                // fallback: ищем любую кнопку, похожую по aria-label/title
+                try {
+                    const buttons = Array.from(doc.querySelectorAll('button'));
+                    const candidates = buttons.filter(b => {
+                        const t = (b.getAttribute('aria-label') || b.getAttribute('title') || '').toLowerCase();
+                        return t.includes('close sidebar') || t.includes('закрыть') || t.includes('боковую панель');
+                    });
+                    return candidates[0] || null;
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            let attempts = 0;
+            const maxAttempts = 80; // ~12 секунд
+
+            function tick() {
+                attempts += 1;
+                const doc = getDoc();
+                if (isSidebarVisible(doc)) {
+                    const btn = findCollapseButton(doc);
+                    if (btn) {
+                        btn.click();
+                        return;
+                    }
+                } else {
+                    // Уже свернут — ничего не делаем.
+                    return;
+                }
+
+                if (attempts < maxAttempts) {
+                    setTimeout(tick, 150);
+                }
+            }
+
+            setTimeout(tick, 150);
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+)
 
 # Уменьшаем левый отступ основного контейнера (чтобы сократить расстояние до сайдбара/колонки регистрации)
 # Значение уменьшено примерно вдвое относительно дефолтного.
@@ -527,6 +614,11 @@ def stream_generate_chat_via_api(*, messages: list, headers: dict, placeholder, 
             f"<div class='gen-stream-box'><pre>{safe_text}</pre></div>",
             unsafe_allow_html=True,
         )
+
+        # Подставляем примечания учителя в авто-промпт, если поле заполнено
+        quiz_notes_txt = (st.session_state.get("quiz_notes") or "").strip()
+        if quiz_notes_txt:
+            auto_prompt += f"\nПримечания учителя: {quiz_notes_txt}\n"
 
     try:
         return openrouter_client.stream_chat_completions(
@@ -1008,29 +1100,30 @@ with col_form:
     # Подтверждение очистки перед генерацией нового плана
     if "confirm_new_generation" not in st.session_state:
         st.session_state["confirm_new_generation"] = False
-    with st.expander("Шаблон запроса (можно править)"):
-        btns = st.columns([1, 1])
-        if btns[0].button("Загрузить запрос по умолчанию"):
-            if not subject or not topic:
-                st.warning("Укажите предмет и тему, чтобы загрузить автопромпт.")
-            else:
-                try:
-                    msgs = _build_lesson_plan_messages(
-                        subject=subject,
-                        grade=grade,
-                        topic=topic,
-                        lesson_type=lesson_type,
-                        class_level=class_level,
-                        notes=notes,
-                        extra_instructions="",
-                    )
-                    if msgs:
-                        st.session_state["prompt_template"] = msgs[-1].get("content", "")
-                except Exception as e:
-                    st.error(f"Не удалось сгенерировать промпт: {e}")
-        if btns[1].button("Сбросить запрос"):
-            st.session_state["prompt_template"] = ""
-        st.text_area("Шаблон запроса", key="prompt_template", height=200, placeholder="Оставьте пустым для автоподстановки")
+    if False:
+        with st.expander("Шаблон запроса (можно править)"):
+            btns = st.columns([1, 1])
+            if btns[0].button("Загрузить запрос по умолчанию"):
+                if not subject or not topic:
+                    st.warning("Укажите предмет и тему, чтобы загрузить автопромпт.")
+                else:
+                    try:
+                        msgs = _build_lesson_plan_messages(
+                            subject=subject,
+                            grade=grade,
+                            topic=topic,
+                            lesson_type=lesson_type,
+                            class_level=class_level,
+                            notes=notes,
+                            extra_instructions="",
+                        )
+                        if msgs:
+                            st.session_state["prompt_template"] = msgs[-1].get("content", "")
+                    except Exception as e:
+                        st.error(f"Не удалось сгенерировать промпт: {e}")
+            if btns[1].button("Сбросить запрос"):
+                st.session_state["prompt_template"] = ""
+            st.text_area("Шаблон запроса", key="prompt_template", height=200, placeholder="Оставьте пустым для автоподстановки")
     # Скрываем селектбокс выбора источника генерации — фиксируем Deepseek по умолчанию
     model_choice = "Deepseek API (через ключ)"
     # Временно убираем выбор видимости из UI — все сохранения будут помечаться как private
@@ -1578,7 +1671,8 @@ with col_editor:
 
         # Действия: сохранить, скачать .docx, очистить
         action_cols = st.columns([1, 1, 1])
-        if action_cols[0].button("Сохранить в БД"):
+        # Кнопка скрыта по просьбе — оставляем код, но не рендерим кнопку
+        if False:
             title = (
                 st.session_state.get("generated_title")
                 or (st.session_state.get("gen_topic") or "План урока")
@@ -1615,7 +1709,7 @@ with col_editor:
             html_for_docx = quill_html_utils.sanitize_html_for_quill(markdown_to_html(md))
         docx_bytes = _html_to_docx_bytes(html_for_docx)
         try:
-            action_cols[1].download_button(
+            action_cols[0].download_button(
                 label="Скачать .docx",
                 data=docx_bytes,
                 file_name=_normalize_material_filename(
@@ -1634,7 +1728,7 @@ with col_editor:
             logging.exception("Error while creating action download button")
             st.error("Не удалось подготовить файл для скачивания. Попробуйте ещё раз.")
 
-        if action_cols[2].button("Очистить"):
+        if action_cols[1].button("Очистить"):
             st.session_state["generated_content"] = ""
             st.session_state["stream_buffer"] = ""
             st.session_state["preview_html"] = ""
@@ -1743,7 +1837,10 @@ if app_mode == "Пользовательский режим":
 
         # Левый столбец: краткая информация, формат и длительность, дополнительные элементы
         with col_left:
-            st.caption(f"Используем: {handout_subject} • {handout_grade} • Тема: {handout_topic or '—'}")
+            st.markdown(
+                f"<div style='font-size:18px;color:#000;font-weight:600'>Используем: {html.escape(str(handout_subject))} • {html.escape(str(handout_grade))} • Тема: {html.escape(str(handout_topic or '—'))}</div>",
+                unsafe_allow_html=True,
+            )
 
             handout_kind = st.selectbox(
                 "Формат материала",
@@ -1753,11 +1850,13 @@ if app_mode == "Пользовательский режим":
                 on_change=_handout_inputs_changed,
             )
 
-            handout_duration = st.selectbox(
-                "Длительность",
-                ["15 минут","1 урок"],
-                index=0,
-                key="handout_duration",
+            handout_time_min = st.slider(
+                "Длительность (мин)",
+                min_value=5,
+                max_value=40,
+                value=int(st.session_state.get("handout_time_min", 15) or 15),
+                step=5,
+                key="handout_time_min",
                 on_change=_handout_inputs_changed,
             )
 
@@ -1768,6 +1867,9 @@ if app_mode == "Пользовательский режим":
                     "примеры",
                     "проблемные вопросы",
                     "тесты с выбором ответа",
+                    "задания на анализ",
+                    "творческие задания",
+                    "рефлексия",
                 ],
                 default=[],
                 key="handout_elements",
@@ -1818,7 +1920,7 @@ if app_mode == "Пользовательский режим":
             f"Тема: {handout_topic}.\n\n"
             f"Формат материала: {handout_kind}.\n"
             f"Формат работы: {handout_work_mode}.\n"
-            f"Длительность: {handout_duration}.\n"
+            f"Длительность: ~{int(st.session_state.get('handout_time_min') or 15)} минут.\n"
             f"Уровень сложности: {handout_difficulty}.\n\n"
             "Общие требования:\n"
             "- Структура: Заголовок → Краткая цель (1–2 строки) → Теория (если нужна) → Задания → Самопроверка (по желанию).\n"
@@ -1842,19 +1944,20 @@ if app_mode == "Пользовательский режим":
         if st.session_state.get("handout_prompt_autofill"):
             st.session_state["handout_prompt_editor"] = auto_prompt
 
-        with st.expander("Шаблон для генерации (можно править)", expanded=False):
-            st.caption("Можно оставить как есть — он собран автоматически из формы выше.")
-            prompt_cols = st.columns([1, 1, 3])
-            if prompt_cols[0].button("Сбросить к авто", key="handout_prompt_reset_btn"):
-                st.session_state["handout_prompt_autofill"] = True
-                st.session_state["handout_prompt_editor"] = auto_prompt
+        if False:
+            with st.expander("Шаблон для генерации (можно править)", expanded=False):
+                st.caption("Можно оставить как есть — он собран автоматически из формы выше.")
+                prompt_cols = st.columns([1, 1, 3])
+                if prompt_cols[0].button("Сбросить к авто", key="handout_prompt_reset_btn"):
+                    st.session_state["handout_prompt_autofill"] = True
+                    st.session_state["handout_prompt_editor"] = auto_prompt
 
-            st.session_state["handout_prompt"] = st.text_area(
-                "Промпт",
-                height=220,
-                key="handout_prompt_editor",
-                on_change=_handout_prompt_mark_dirty,
-            )
+                st.session_state["handout_prompt"] = st.text_area(
+                    "Промпт",
+                    height=220,
+                    key="handout_prompt_editor",
+                    on_change=_handout_prompt_mark_dirty,
+                )
 
         gen_cols = st.columns([1, 1, 2])
         if gen_cols[0].button("Сгенерировать раздаточный материал (ИИ)", key="handout_generate_btn"):
@@ -1975,16 +2078,37 @@ if app_mode == "Пользовательский режим":
         if st.session_state.get("quiz_title_autofill"):
             st.session_state["quiz_title"] = quiz_topic or "Викторина"
 
-        st.caption(
-            f"Используем для викторины: {quiz_subject} • {quiz_grade} • Тема: {quiz_topic or '—'}"
+        st.markdown(
+            f"<div style='font-size:18px;color:#000;font-weight:600'>Используем для викторины: {html.escape(str(quiz_subject))} • {html.escape(str(quiz_grade))} • Тема: {html.escape(str(quiz_topic or '—'))}</div>",
+            unsafe_allow_html=True,
         )
 
         params_cols = st.columns([2, 1, 2])
-        quiz_title = params_cols[0].text_input(
-            "Название викторины",
-            value=st.session_state.get("quiz_title", (quiz_topic or "Викторина")),
-            key="quiz_title",
-            on_change=lambda: (st.session_state.__setitem__("quiz_title_autofill", False), _quiz_params_changed()),
+        # Название викторины формируется автоматически из темы и хранится в session_state.
+        quiz_title = st.session_state.get("quiz_title", (quiz_topic or "Викторина"))
+        quiz_delivery = params_cols[0].selectbox(
+            "Формат проведения",
+            [
+                "Устный (ведущий читает — дети отвечают)",
+                "Письменный (распечатанные бланки / рабочие листы)",
+                "Интерактивный (презентация, кликер)",
+                "Смешанный (устно + письменно)",
+            ],
+            index=0,
+            key="quiz_delivery",
+            on_change=_quiz_params_changed,
+        )
+        quiz_types = params_cols[0].multiselect(
+            "Форматы",
+            [
+                "Выбор одного ответа",
+                "Несколько ответов",
+                "Верно/неверно",
+                "Короткий ответ",
+            ],
+            default=["Выбор одного ответа", "Верно/неверно"],
+            key="quiz_types",
+            on_change=_quiz_params_changed,
         )
         quiz_num_questions = params_cols[1].slider(
             "Вопросов",
@@ -2003,23 +2127,38 @@ if app_mode == "Пользовательский режим":
             on_change=_quiz_params_changed,
         )
 
-        quiz_types = st.multiselect(
-            "Форматы вопросов",
-            [
-                "Выбор одного ответа",
-                "Несколько ответов",
-                "Верно/неверно",
-                "Короткий ответ",
-            ],
-            default=["Выбор одного ответа", "Верно/неверно"],
-            key="quiz_types",
+        quiz_mode = params_cols[2].selectbox(
+            "Тип викторины",
+            ["Индивидуальная", "Командная", "Парная", "Общеклассная"],
+            index=0,
+            key="quiz_mode",
             on_change=_quiz_params_changed,
         )
-        quiz_time_min = st.number_input(
+
+        quiz_dynamics = params_cols[2].selectbox(
+            "Динамика",
+            [
+                "Соревновательная (баллы, очки, жетоны)",
+                "Без соревнования (познавательная)",
+                "С призами / наклейками / поощрениями",
+            ],
+            index=1,
+            key="quiz_dynamics",
+            on_change=_quiz_params_changed,
+        )
+
+        quiz_notes = params_cols[0].text_area(
+            "Примечания (опционально)",
+            value=st.session_state.get("quiz_notes", ""),
+            key="quiz_notes",
+            on_change=_quiz_params_changed,
+            height=80,
+        )
+        quiz_time_min = params_cols[1].slider(
             "Ориентировочное время (мин)",
             min_value=5,
-            max_value=90,
-            value=15,
+            max_value=40,
+            value=int(st.session_state.get("quiz_time_min", 15) or 15),
             step=5,
             key="quiz_time_min",
             on_change=_quiz_params_changed,
@@ -2037,6 +2176,9 @@ if app_mode == "Пользовательский режим":
             f"Название викторины: {quiz_title or 'Викторина'}.\n"
             f"Количество вопросов: {int(quiz_num_questions)}.\n"
             f"Сложность: {quiz_difficulty}.\n"
+            f"Тип викторины: {st.session_state.get('quiz_mode', 'Индивидуальная')}.\n"
+            f"Формат проведения: {st.session_state.get('quiz_delivery', 'Устный (ведущий читает — дети отвечают)')}.\n"
+            f"Динамика: {st.session_state.get('quiz_dynamics', 'Без соревнования (познавательная)')}.\n"
             f"Форматы вопросов: {types_hint}.\n"
             f"Время выполнения: ~{int(quiz_time_min)} минут.\n\n"
             "Требования к качеству:\n"
@@ -2079,18 +2221,19 @@ if app_mode == "Пользовательский режим":
         else:
             st.info("Промпт был изменён вручную и не автообновляется. Нажмите «Сбросить к авто», если тема/параметры изменились.")
 
-        with st.expander("Шаблон для генерации (можно править)", expanded=False):
-            prompt_cols = st.columns([1, 3])
-            if prompt_cols[0].button("Сбросить к авто", key="quiz_prompt_reset_btn"):
-                st.session_state["quiz_prompt_autofill"] = True
-                st.session_state["quiz_prompt_editor"] = auto_prompt
+        if False:
+            with st.expander("Шаблон для генерации (можно править)", expanded=False):
+                prompt_cols = st.columns([1, 3])
+                if prompt_cols[0].button("Сбросить к авто", key="quiz_prompt_reset_btn"):
+                    st.session_state["quiz_prompt_autofill"] = True
+                    st.session_state["quiz_prompt_editor"] = auto_prompt
 
-            st.text_area(
-                "Промпт",
-                height=240,
-                key="quiz_prompt_editor",
-                on_change=_quiz_mark_prompt_dirty,
-            )
+                st.text_area(
+                    "Промпт",
+                    height=240,
+                    key="quiz_prompt_editor",
+                    on_change=_quiz_mark_prompt_dirty,
+                )
 
         gen_cols = st.columns([1, 1, 2])
         if gen_cols[0].button("Сгенерировать викторину (ИИ)", key="quiz_generate_btn"):
@@ -2319,7 +2462,10 @@ if app_mode == "Пользовательский режим":
             talk_grade = st.session_state.get("gen_grade") or st.session_state.get("handout_grade") or GRADES[0]
             talk_topic = (st.session_state.get("gen_topic") or "").strip()
 
-            st.caption(f"Используем: {talk_subject} • {talk_grade} • Тема: {talk_topic or '—'}")
+            st.markdown(
+                f"<div style='font-size:18px;color:#000;font-weight:600'>Используем: {html.escape(str(talk_subject))} • {html.escape(str(talk_grade))} • Тема: {html.escape(str(talk_topic or '—'))}</div>",
+                unsafe_allow_html=True,
+            )
 
             left, right = st.columns(2)
 
@@ -2370,7 +2516,6 @@ if app_mode == "Пользовательский режим":
                     placeholder="Выберите параметры",
                 )
 
-            with right:
                 talk_time_min = st.slider(
                     "Время беседы (мин)",
                     min_value=5,
@@ -2380,7 +2525,15 @@ if app_mode == "Пользовательский режим":
                     key="talk_time_min",
                     on_change=_talk_params_changed,
                 )
+                talk_notes = st.text_area(
+                    "Примечания (опционально)",
+                    value=st.session_state.get("talk_notes", ""),
+                    key="talk_notes",
+                    on_change=_talk_params_changed,
+                    height=80,
+                )
 
+            with right:
                 talk_integration = st.multiselect(
                     "Интеграция с другими предметами (межпредметные связи)",
                     [
@@ -2396,15 +2549,22 @@ if app_mode == "Пользовательский режим":
                     placeholder="Выберите параметры",
                 )
 
+                # Отображаем пользователю только короткие метки, а подсказки для промпта
+                # храним отдельно и добавляем в auto_prompt (скрыты от учителя)
+                audience_hints = {
+                    "Класс с высоким уровнем развития": "нужны проблемные вопросы, элементы дискуссии, можно использовать более сложные термины",
+                    "Обычный общеобразовательный класс": "нужна опора на наглядность и простые формулировки",
+                    "Класс с низкой учебной мотивацией": "тяжело воспринимают информацию на слух. Нужно: очень короткие блоки по 2-3 минуты, постоянная смена деятельности, больше игровых моментов, простой язык, минимум терминов",
+                }
+
                 talk_audience = st.selectbox(
                     "Особенности аудитории",
                     [
-                        "—",
-                        "Уровень подготовки класса (высокий, средний, есть ли дети, для которых русский не родной).",
-                        "Особые образовательные потребности",
-                        "Особый интерес класса",
+                        "Класс с высоким уровнем развития",
+                        "Обычный общеобразовательный класс",
+                        "Класс с низкой учебной мотивацией",
                     ],
-                    index=0,
+                    index=1,
                     key="talk_audience",
                     on_change=_talk_params_changed,
                 )
@@ -2454,8 +2614,20 @@ if app_mode == "Пользовательский режим":
                 auto_prompt += f"Обязательно включить элементы: {elements_txt}.\n"
             if integration_txt:
                 auto_prompt += f"Межпредметные связи: {integration_txt}.\n"
+            talk_notes_txt = (st.session_state.get("talk_notes") or "").strip()
+            if talk_notes_txt:
+                auto_prompt += f"Примечания учителя: {talk_notes_txt}\n"
             if audience_txt:
                 auto_prompt += f"Особенности аудитории: {audience_txt}\n"
+                # Добавляем скрытую подсказку в автоматически формируемый промпт,
+                # чтобы учитель её не видел в интерфейсе, но модель учитывала.
+                hint = ""
+                try:
+                    hint = audience_hints.get(st.session_state.get("talk_audience", ""), "")
+                except Exception:
+                    hint = ""
+                if hint:
+                    auto_prompt += f"В промпте добавь - {hint}\n"
             if tone_txt:
                 auto_prompt += f"Тон общения: {tone_txt}.\n"
 
@@ -2472,18 +2644,19 @@ if app_mode == "Пользовательский режим":
             if st.session_state.get("talk_prompt_autofill"):
                 st.session_state["talk_prompt_editor"] = auto_prompt
 
-            with st.expander("Шаблон для генерации (можно править)", expanded=False):
-                prompt_cols = st.columns([1, 3])
-                if prompt_cols[0].button("Сбросить к авто", key="talk_prompt_reset_btn"):
-                    st.session_state["talk_prompt_autofill"] = True
-                    st.session_state["talk_prompt_editor"] = auto_prompt
+            if False:
+                with st.expander("Шаблон для генерации (можно править)", expanded=False):
+                    prompt_cols = st.columns([1, 3])
+                    if prompt_cols[0].button("Сбросить к авто", key="talk_prompt_reset_btn"):
+                        st.session_state["talk_prompt_autofill"] = True
+                        st.session_state["talk_prompt_editor"] = auto_prompt
 
-                st.text_area(
-                    "Промпт",
-                    height=240,
-                    key="talk_prompt_editor",
-                    on_change=lambda: st.session_state.__setitem__("talk_prompt_autofill", False),
-                )
+                    st.text_area(
+                        "Промпт",
+                        height=240,
+                        key="talk_prompt_editor",
+                        on_change=lambda: st.session_state.__setitem__("talk_prompt_autofill", False),
+                    )
 
             st.session_state.setdefault("talk_generated_md", "")
             gen_cols = st.columns([1, 1, 2])
@@ -2563,45 +2736,48 @@ if app_mode == "Пользовательский режим":
                             logging.exception("Error while registering talk in DB")
                             st.error("Не удалось сохранить метаданные беседы в БД.")
 
-                    if btn_cols[1].button("Сохранить в БД", key="talk_save_db_btn"):
+                    # Скрытая кнопка "Сохранить в БД"
+                    if False:
                         _register_talk()
                 except Exception as e:
                     logging.exception("Error while converting talk to docx")
                     st.error(f"Не удалось собрать .docx: {e}")
 
     # Подсказка: быстрый поиск и просмотр материалов (как дополнительный блок)
-    with st.expander("Поиск по материалам / AI-помощник"):
-        query = st.text_input("Введите запрос для поиска по материалам и AI", key="search_query")
-        if st.button("Поиск", key="search_btn"):
-            if not query:
-                st.warning("Введите запрос.")
-            else:
-                with st.spinner("🔍 Ищу..."):
-                    results = []
-                    if api_key:
-                        try:
-                            headers = {
-                                "Authorization": f"Bearer {api_key}",
-                                "Content-Type": "application/json",
-                                "HTTP-Referer": "https://teacher-assistant.streamlit.app",
-                                "X-Title": "Teacher Assistant Search"
-                            }
-                            data = {
-                                "model": "deepseek/deepseek-chat",
-                                "messages": [{"role": "user", "content": f"Помоги учителю найти: {query}"}],
-                                "temperature": 0.5,
-                                "max_tokens": 800,
-                            }
-                            resp = requests.post(DEEPSEEK_API_BASE, headers=headers, json=data, timeout=30)
-                            resp.raise_for_status()
-                            ai_response = resp.json()["choices"][0]["message"]["content"]
-                            results.append({"title": f"AI: {query}", "snippet": ai_response, "type": "ai_response"})
-                        except Exception:
-                            pass
+    # Блок временно скрыт — обернут в условие, чтобы не рендериться в UI.
+    if False:
+        with st.expander("Поиск по материалам / AI-помощник"):
+            query = st.text_input("Введите запрос для поиска по материалам и AI", key="search_query")
+            if st.button("Поиск", key="search_btn"):
+                if not query:
+                    st.warning("Введите запрос.")
+                else:
+                    with st.spinner("🔍 Ищу..."):
+                        results = []
+                        if api_key:
+                            try:
+                                headers = {
+                                    "Authorization": f"Bearer {api_key}",
+                                    "Content-Type": "application/json",
+                                    "HTTP-Referer": "https://teacher-assistant.streamlit.app",
+                                    "X-Title": "Teacher Assistant Search"
+                                }
+                                data = {
+                                    "model": "deepseek/deepseek-chat",
+                                    "messages": [{"role": "user", "content": f"Помоги учителю найти: {query}"}],
+                                    "temperature": 0.5,
+                                    "max_tokens": 800,
+                                }
+                                resp = requests.post(DEEPSEEK_API_BASE, headers=headers, json=data, timeout=30)
+                                resp.raise_for_status()
+                                ai_response = resp.json()["choices"][0]["message"]["content"]
+                                results.append({"title": f"AI: {query}", "snippet": ai_response, "type": "ai_response"})
+                            except Exception:
+                                pass
 
-                    for p in materials_dir.glob("**/*"):
-                        if query.lower() in p.name.lower():
-                            results.append({"title": f"Файл: {p.name}", "snippet": str(p), "type": "local_file"})
+                        for p in materials_dir.glob("**/*"):
+                            if query.lower() in p.name.lower():
+                                results.append({"title": f"Файл: {p.name}", "snippet": str(p), "type": "local_file"})
 
                     if results:
                         for r in results:
