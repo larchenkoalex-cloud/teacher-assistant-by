@@ -3,6 +3,7 @@ import re
 import html
 import time
 import uuid
+import logging
 from io import BytesIO
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,7 +12,128 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from bs4 import BeautifulSoup, NavigableString
-import logging
+
+YANDEX_METRIKA_COUNTER_ID = 106785768
+
+
+def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
+    """Инъекция Яндекс.Метрики в Streamlit.
+
+    Важно: Streamlit не гарантирует исполнение <script> из st.markdown,
+    поэтому используем components.html и добавляем tag.js в window.parent.document.
+    """
+    session_key = f"__ym_injected_{counter_id}"
+    if st.session_state.get(session_key):
+        return
+    st.session_state[session_key] = True
+
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            var counterId = {counter_id};
+
+            function getParentWindow() {{
+                try {{
+                    return (window.parent && window.parent.document) ? window.parent : window;
+                }} catch (e) {{
+                    return window;
+                }}
+            }}
+
+            var w = getParentWindow();
+            var d = w.document || document;
+
+            function debugEnabled() {{
+                try {{
+                    return !!(w.localStorage && w.localStorage.getItem('ym_debug') === '1');
+                }} catch (e) {{
+                    return false;
+                }}
+            }}
+            function log() {{
+                if (!debugEnabled()) return;
+                try {{ console.log.apply(console, ['YAMETRIKA:'].concat([].slice.call(arguments))); }} catch (e) {{}}
+            }}
+
+            try {{
+                w.__ymInjected = w.__ymInjected || {{}};
+                if (w.__ymInjected[counterId]) {{
+                    log('already injected');
+                    return;
+                }}
+                w.__ymInjected[counterId] = true;
+
+                log('context', (w === window ? 'iframe' : 'parent'));
+
+                // 1) Stub ym (очередь) — как в официальном сниппете.
+                w.ym = w.ym || function() {{
+                    (w.ym.a = w.ym.a || []).push(arguments);
+                }};
+                w.ym.l = w.ym.l || (1 * new Date());
+
+                // 2) Подгружаем tag.js один раз.
+                var TAG_SRC = 'https://mc.yandex.ru/metrika/tag.js';
+                var scripts = d.getElementsByTagName('script');
+                for (var i = 0; i < scripts.length; i++) {{
+                    if (scripts[i].src === TAG_SRC) {{
+                        log('tag.js already present');
+                        break;
+                    }}
+                }}
+                if (i === scripts.length) {{
+                    var s = d.createElement('script');
+                    s.async = true;
+                    s.src = TAG_SRC;
+                    var firstScript = scripts[0];
+                    if (firstScript && firstScript.parentNode) {{
+                        firstScript.parentNode.insertBefore(s, firstScript);
+                    }} else if (d.head) {{
+                        d.head.appendChild(s);
+                    }} else if (d.body) {{
+                        d.body.appendChild(s);
+                    }}
+                    log('tag.js injected');
+                }}
+
+                // 3) init только один раз на окно.
+                w.__ymInitialized = w.__ymInitialized || {{}};
+                if (!w.__ymInitialized[counterId]) {{
+                    w.__ymInitialized[counterId] = true;
+                    w.ym(counterId, 'init', {{
+                        ssr: true,
+                        webvisor: true,
+                        clickmap: true,
+                        ecommerce: 'dataLayer',
+                        accurateTrackBounce: true,
+                        trackLinks: true
+                    }});
+                    log('init queued');
+                }} else {{
+                    log('already initialized');
+                }}
+
+                // Debug-only: ручной пиксель, чтобы увидеть /watch в Network
+                // и быстро понять, блокирует ли его расширение (ERR_BLOCKED_BY_CLIENT).
+                if (debugEnabled()) {{
+                    try {{
+                        var img = new Image(1, 1);
+                        img.referrerPolicy = 'no-referrer-when-downgrade';
+                        img.src = 'https://mc.yandex.ru/watch/' + counterId + '?debug=1&r=' + Math.random();
+                        log('debug pixel requested');
+                    }} catch (e) {{
+                        log('debug pixel error', e);
+                    }}
+                }}
+            }} catch (e) {{
+                log('error', e);
+            }}
+        }})();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
 
 try:
     from streamlit_quill import st_quill
@@ -118,6 +240,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+inject_yandex_metrika()
+
 # Streamlit может запоминать состояние сайдбара в браузере и игнорировать
 # initial_sidebar_state на следующих запусках. Этот хак пытается свернуть
 # сайдбар на старте, проверяя фактическую видимость панели.
@@ -193,80 +317,12 @@ components.html(
             }
 
             setTimeout(tick, 150);
-        })();
-        </script>
-        """,
-        height=0,
-        width=0,
-)
-
-# Yandex.Metrica: вставляем официальный скрипт счётчика (ID из вашего кабинета)
-components.html(
-    """
-    <script>
-    (function(){
-        // Попытка вставить скрипт в parent-документ, а не в iframe, чтобы счётчик работал корректно
-        var COUNTER_ID = 106785768;
-        function injectToDoc(doc){
-            if(!doc) return null;
-            try{
-                var existing = doc.querySelector('script[src*="mc.yandex.ru/metrika/tag.js?id=' + COUNTER_ID + '"]');
-                if(existing) return existing;
-                var s = doc.createElement('script');
-                s.type = 'text/javascript';
-                s.async = true;
-                s.src = 'https://mc.yandex.ru/metrika/tag.js?id=' + COUNTER_ID;
-                doc.head.appendChild(s);
-                return s;
-            }catch(e){return null;}
-        }
-
-        function injectPixel(doc){
-            if(!doc || !doc.body) return;
-            try{
-                var existing = doc.querySelector('img[src*="mc.yandex.ru/watch/' + COUNTER_ID + '"]');
-                if(existing) return;
-                var img = doc.createElement('img');
-                img.src = 'https://mc.yandex.ru/watch/' + COUNTER_ID;
-                img.style.position = 'absolute';
-                img.style.left = '-9999px';
-                img.alt = '';
-                doc.body.appendChild(img);
-            }catch(e){/* ignore */}
-        }
-
-        var parentDoc = null;
-        try{ parentDoc = window.parent && window.parent.document ? window.parent.document : null; }catch(e){ parentDoc = null; }
-        var targetDoc = parentDoc || document;
-        var scriptEl = injectToDoc(targetDoc);
-        injectPixel(targetDoc);
-
-        function initYm(){
-            try{
-                var ymFn = (parent && parent.ym) ? parent.ym : (window.ym || null);
-                if(ymFn){
-                    try{ ymFn(COUNTER_ID, 'init', {ssr:true, webvisor:true, clickmap:true, ecommerce:"dataLayer", referrer: document.referrer, url: location.href, accurateTrackBounce:true, trackLinks:true}); }catch(e){}
-                } else {
-                    // если ym ещё не определён — отложим попытку
-                    setTimeout(initYm, 800);
-                }
-            }catch(e){/* ignore */}
-        }
-
-        if(scriptEl){
-            scriptEl.addEventListener('load', initYm);
-            setTimeout(initYm, 1500);
-        } else {
-            // Если скрипт не вставлен (например, из-за политики), попробуем инициализировать прямо
-            initYm();
-        }
-    })();
-    </script>
-    <noscript><div><img src="https://mc.yandex.ru/watch/106785768" style="position:absolute; left:-9999px;" alt="" /></div></noscript>
-    """,
-    height=0,
-    width=0,
-)
+            })();
+            </script>
+            """,
+            height=0,
+            width=0,
+    )
 
 # Уменьшаем левый отступ основного контейнера (чтобы сократить расстояние до сайдбара/колонки регистрации)
 # Значение уменьшено примерно вдвое относительно дефолтного.
@@ -1805,7 +1861,7 @@ with col_editor:
 
         # Примечание: раньше тут был режим «вставьте выделенный текст». Теперь основная замена
         # делается прямо в редакторе через ПКМ (см. блок выше).
-if show_recent_plans:
+if st.session_state.get("show_recent_plans", False):
     with st.expander("Последние сохранённые планы уроков", expanded=False):
         plans = list_lesson_plans(limit=10)
         if plans:
