@@ -54,14 +54,38 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                 }} catch (e) {{}}
             }}
 
-            try {{
-                w.__ymMetrikaInitialized = w.__ymMetrikaInitialized || {{}};
-                if (w.__ymMetrikaInitialized[counterId]) {{
-                    log('already initialized');
-                    return;
-                }}
+            function ensureYmStub(targetWindow) {{
+                if (!targetWindow) return;
+                targetWindow.ym = targetWindow.ym || function() {{
+                    (targetWindow.ym.a = targetWindow.ym.a || []).push(arguments);
+                }};
+                targetWindow.ym.l = targetWindow.ym.l || (1 * new Date());
+            }}
 
-                // Официальный подход: stub ym + загрузка tag.js + init.
+            function safeHref(targetWindow) {{
+                try {{
+                    return (targetWindow && targetWindow.location && targetWindow.location.href) ? targetWindow.location.href : '';
+                }} catch (e) {{
+                    return '';
+                }}
+            }}
+
+            try {{
+                w.__ymMetrikaState = w.__ymMetrikaState || {{
+                    initialized: {{}},
+                    lastHit: {{}}
+                }};
+
+                ensureYmStub(w);
+                try {{
+                    if (window !== w) {{
+                        window.ym = function() {{
+                            return w.ym.apply(w, arguments);
+                        }};
+                    }}
+                }} catch (e) {{}}
+
+                // Официальный подход: stub ym + загрузка tag.js.
                 (function(m,e,t,r,i,k,a) {{
                     m[i]=m[i]||function(){{ (m[i].a=m[i].a||[]).push(arguments) }};
                     m[i].l=1*new Date();
@@ -90,24 +114,35 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                     log('tag.js injected');
                 }})(w, d, 'script', 'https://mc.yandex.ru/metrika/tag.js', 'ym');
 
-                w.ym(counterId, 'init', {{
-                    ssr: true,
-                    webvisor: true,
-                    clickmap: true,
-                    ecommerce: 'dataLayer',
-                    accurateTrackBounce: true,
-                    trackLinks: true
-                }});
-                log('init queued');
+                if (!w.__ymMetrikaState.initialized[counterId]) {{
+                    w.ym(counterId, 'init', {{
+                        ssr: true,
+                        webvisor: true,
+                        clickmap: true,
+                        ecommerce: 'dataLayer',
+                        accurateTrackBounce: true,
+                        trackLinks: true
+                    }});
+                    w.__ymMetrikaState.initialized[counterId] = true;
+                    log('init queued');
+                }}
 
-                // Явно отправляем первый hit на текущую страницу.
-                w.ym(counterId, 'hit', w.location.href, {{
-                    title: d.title || '',
-                    referer: d.referrer || ''
-                }});
-                log('hit queued', w.location.href);
+                // Отправляем hit на загрузке, но с защитой от дублирования при частых rerun.
+                var href = safeHref(w);
+                var now = Date.now();
+                var last = w.__ymMetrikaState.lastHit[counterId] || null;
+                var shouldSendHit = !last || last.href !== href || (now - last.ts) > 15000;
 
-                w.__ymMetrikaInitialized[counterId] = true;
+                if (shouldSendHit) {{
+                    w.ym(counterId, 'hit', href, {{
+                        title: d.title || '',
+                        referer: d.referrer || ''
+                    }});
+                    w.__ymMetrikaState.lastHit[counterId] = {{ href: href, ts: now }};
+                    log('hit queued', href);
+                }} else {{
+                    log('hit skipped (deduplicated)');
+                }}
             }} catch (e) {{
                 try {{ console.error('YAMETRIKA init error:', e); }} catch (_) {{}}
             }}
