@@ -133,37 +133,16 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                 var last = w.__ymMetrikaState.lastHit[counterId] || null;
                 var shouldSendHit = !last || last.href !== href || (now - last.ts) > 15000;
 
-                if (shouldSendHit) {
-                    try {
-                        if (typeof w.ym === 'function') {
-                            w.ym(counterId, 'hit', href, {
-                                title: d.title || '',
-                                referer: d.referrer || ''
-                            });
-                            w.__ymMetrikaState.lastHit[counterId] = { href: href, ts: now };
-                            log('hit queued', href);
-                        } else {
-                            // fallback: send image pixel directly to mc.yandex.ru/watch
-                            var px = new Image();
-                            var src = 'https://mc.yandex.ru/watch/' + counterId + '?page=' + encodeURIComponent(href) + '&r=' + Math.floor(now/1000);
-                            try { px.src = src; log('pixel fallback sent', src); } catch(e) { log('pixel fallback failed', e); }
-                            w.__ymMetrikaState.lastHit[counterId] = { href: href, ts: now };
-                        }
-                    } catch (e) {
-                        log('hit error', e);
-                        try {
-                            var px2 = new Image();
-                            var src2 = 'https://mc.yandex.ru/watch/' + counterId + '?page=' + encodeURIComponent(href) + '&r=' + Math.floor(now/1000);
-                            px2.src = src2;
-                            log('pixel fallback after error sent', src2);
-                            w.__ymMetrikaState.lastHit[counterId] = { href: href, ts: now };
-                        } catch (e2) {
-                            log('pixel fallback failed too', e2);
-                        }
-                    }
-                } else {
+                if (shouldSendHit) {{
+                    w.ym(counterId, 'hit', href, {{
+                        title: d.title || '',
+                        referer: d.referrer || ''
+                    }});
+                    w.__ymMetrikaState.lastHit[counterId] = {{ href: href, ts: now }};
+                    log('hit queued', href);
+                }} else {{
                     log('hit skipped (deduplicated)');
-                }
+                }}
             }} catch (e) {{
                 try {{ console.error('YAMETRIKA init error:', e); }} catch (_) {{}}
             }}
