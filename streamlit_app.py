@@ -148,27 +148,71 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                 var shouldSendHit = !last || last.href !== href || (now - last.ts) > 15000;
 
                 if (shouldSendHit) {{
-                    w.ym(counterId, 'hit', href, {{
-                        title: d.title || '',
-                        referer: d.referrer || ''
-                    }});
-                    w.__ymMetrikaState.lastHit[counterId] = {{ href: href, ts: now }};
-                    log('hit queued', href);
+                    // Попытаемся инициализировать и вызвать ym повторно несколько раз
+                    // в parent/родительском контексте. Если runtime не появится — отправим пиксель.
+                    var maxChecks = 16; // ~8 секунд общей задержки
+                    var checks = 0;
+                    var intervalMs = 500;
+                    var sent = false;
 
-                    // Если runtime Метрики не поднялся (tag.js заблокирован/не выполнился),
-                    // отправляем резервный пиксель, чтобы запрос /watch появился в Network.
-                    setTimeout(function() {{
+                    function attemptInitIfNeeded() {{
                         try {{
-                            var ymRuntimeReady = !!(w.Ya && w.Ya.Metrika2);
-                            if (!ymRuntimeReady) {{
-                                sendPixelFallback(counterId, href, 'runtime_not_ready');
-                            }} else {{
-                                log('metrika runtime ready');
+                            if (!w.__ymMetrikaState.initialized[counterId] && typeof w.ym === 'function') {{
+                                try {{
+                                    w.ym(counterId, 'init', {{
+                                        ssr: true,
+                                        webvisor: true,
+                                        clickmap: true,
+                                        ecommerce: 'dataLayer',
+                                        accurateTrackBounce: true,
+                                        trackLinks: true
+                                    }});
+                                    w.__ymMetrikaState.initialized[counterId] = true;
+                                    log('init called during retry');
+                                }} catch (e) {{
+                                    log('init during retry failed', e);
+                                }}
                             }}
                         }} catch (e) {{
-                            sendPixelFallback(counterId, href, 'runtime_check_error');
+                            log('attemptInitIfNeeded error', e);
                         }}
-                    }}, 3500);
+                    }}
+
+                    function attemptSend() {{
+                        try {{
+                            attemptInitIfNeeded();
+                            if (typeof w.ym === 'function' && w.__ymMetrikaState.initialized[counterId]) {{
+                                try {{
+                                    w.ym(counterId, 'hit', href, {{
+                                        title: d.title || '',
+                                        referer: d.referrer || ''
+                                    }});
+                                    w.__ymMetrikaState.lastHit[counterId] = {{ href: href, ts: Date.now() }};
+                                    sent = true;
+                                    log('hit sent via ym', href);
+                                    clearInterval(intervalId);
+                                    return;
+                                }} catch (e) {{
+                                    log('ym hit error', e);
+                                }}
+                            }}
+                        }} catch (e) {{
+                            log('attemptSend error', e);
+                        }}
+
+                        checks += 1;
+                        if (checks >= maxChecks) {{
+                            clearInterval(intervalId);
+                            if (!sent) {{
+                                // После серии попыток отправляем резервный пиксель
+                                sendPixelFallback(counterId, href, 'runtime_not_ready_after_retries');
+                            }}
+                        }}
+                    }}
+
+                    attemptSend();
+                    var intervalId = setInterval(attemptSend, intervalMs);
+                    log('hit queued (will retry until runtime is ready)', href);
                 }} else {{
                     log('hit skipped (deduplicated)');
                 }}
