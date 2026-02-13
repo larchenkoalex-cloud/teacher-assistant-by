@@ -84,8 +84,17 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                 }}
             }}
 
+            function isRuntimeReady(targetWindow) {{
+                try {{
+                    return !!(targetWindow && targetWindow.Ya && targetWindow.Ya.Metrika2);
+                }} catch (e) {{
+                    return false;
+                }}
+            }}
+
             try {{
                 w.__ymMetrikaState = w.__ymMetrikaState || {{
+                    initQueued: {{}},
                     initialized: {{}},
                     lastHit: {{}}
                 }};
@@ -128,7 +137,7 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                     log('tag.js injected');
                 }})(w, d, 'script', 'https://mc.yandex.ru/metrika/tag.js', 'ym');
 
-                if (!w.__ymMetrikaState.initialized[counterId]) {{
+                if (!w.__ymMetrikaState.initQueued[counterId]) {{
                     w.ym(counterId, 'init', {{
                         ssr: true,
                         webvisor: true,
@@ -137,8 +146,11 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                         accurateTrackBounce: true,
                         trackLinks: true
                     }});
-                    w.__ymMetrikaState.initialized[counterId] = true;
+                    w.__ymMetrikaState.initQueued[counterId] = true;
                     log('init queued');
+                }}
+                if (isRuntimeReady(w)) {{
+                    w.__ymMetrikaState.initialized[counterId] = true;
                 }}
 
                 // Отправляем hit на загрузке, но с защитой от дублирования при частых rerun.
@@ -157,7 +169,7 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
 
                     function attemptInitIfNeeded() {{
                         try {{
-                            if (!w.__ymMetrikaState.initialized[counterId] && typeof w.ym === 'function') {{
+                            if (!w.__ymMetrikaState.initQueued[counterId] && typeof w.ym === 'function') {{
                                 try {{
                                     w.ym(counterId, 'init', {{
                                         ssr: true,
@@ -167,11 +179,14 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                                         accurateTrackBounce: true,
                                         trackLinks: true
                                     }});
-                                    w.__ymMetrikaState.initialized[counterId] = true;
-                                    log('init called during retry');
+                                    w.__ymMetrikaState.initQueued[counterId] = true;
+                                    log('init queued during retry');
                                 }} catch (e) {{
                                     log('init during retry failed', e);
                                 }}
+                            }}
+                            if (isRuntimeReady(w)) {{
+                                w.__ymMetrikaState.initialized[counterId] = true;
                             }}
                         }} catch (e) {{
                             log('attemptInitIfNeeded error', e);
@@ -181,7 +196,8 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                     function attemptSend() {{
                         try {{
                             attemptInitIfNeeded();
-                            if (typeof w.ym === 'function' && w.__ymMetrikaState.initialized[counterId]) {{
+                            var runtimeReady = isRuntimeReady(w);
+                            if (runtimeReady && typeof w.ym === 'function' && w.__ymMetrikaState.initialized[counterId]) {{
                                 try {{
                                     w.ym(counterId, 'hit', href, {{
                                         title: d.title || '',
@@ -206,6 +222,8 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                             if (!sent) {{
                                 // После серии попыток отправляем резервный пиксель
                                 sendPixelFallback(counterId, href, 'runtime_not_ready_after_retries');
+                                w.__ymMetrikaState.lastHit[counterId] = {{ href: href, ts: Date.now() }};
+                                log('hit sent via fallback pixel', href);
                             }}
                         }}
                     }}
@@ -213,23 +231,6 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                     attemptSend();
                     var intervalId = setInterval(attemptSend, intervalMs);
                     log('hit queued (will retry until runtime is ready)', href);
-
-                    // Гарантированный автотест: если через 4.5s ничего не отправлено,
-                    // посылаем принудительный авто-пиксель (чтобы гарантировать запись).
-                    setTimeout(function() {{
-                        try {{
-                            var already = !!(w.__ymMetrikaState.lastHit && w.__ymMetrikaState.lastHit[counterId]);
-                            if (!already) {{
-                                var src = 'https://mc.yandex.ru/watch/' + counterId + '?dbg=auto&rn=' + Date.now();
-                                (new Image()).src = src;
-                                log('auto pixel forced', src);
-                            }} else {{
-                                log('auto pixel skipped — already sent');
-                            }}
-                        }} catch (e) {{
-                            log('auto pixel error', e);
-                        }}
-                    }}, 4500);
                 }} else {{
                     log('hit skipped (deduplicated)');
                 }}
@@ -349,8 +350,6 @@ st.set_page_config(
 )
 
 inject_yandex_metrika()
-
-# Debug panel removed — automatic hit/retry and fallback remains active.
 # Streamlit может запоминать состояние сайдбара в браузере и игнорировать
 # initial_sidebar_state на следующих запусках. Этот хак пытается свернуть
 # сайдбар на старте, проверяя фактическую видимость панели.
