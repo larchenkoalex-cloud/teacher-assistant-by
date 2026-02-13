@@ -22,11 +22,6 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
     Важно: Streamlit не гарантирует исполнение <script> из st.markdown,
     поэтому используем components.html и добавляем tag.js в window.parent.document.
     """
-    session_key = f"__ym_injected_{counter_id}"
-    if st.session_state.get(session_key):
-        return
-    st.session_state[session_key] = True
-
     components.html(
         f"""
         <script>
@@ -51,82 +46,70 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                     return false;
                 }}
             }}
+
             function log() {{
                 if (!debugEnabled()) return;
-                try {{ console.log.apply(console, ['YAMETRIKA:'].concat([].slice.call(arguments))); }} catch (e) {{}}
+                try {{
+                    console.log.apply(console, ['YAMETRIKA:'].concat([].slice.call(arguments)));
+                }} catch (e) {{}}
             }}
 
             try {{
-                w.__ymInjected = w.__ymInjected || {{}};
-                if (w.__ymInjected[counterId]) {{
-                    log('already injected');
+                w.__ymMetrikaInitialized = w.__ymMetrikaInitialized || {{}};
+                if (w.__ymMetrikaInitialized[counterId]) {{
+                    log('already initialized');
                     return;
                 }}
-                w.__ymInjected[counterId] = true;
 
-                log('context', (w === window ? 'iframe' : 'parent'));
+                // Официальный подход: stub ym + загрузка tag.js + init.
+                (function(m,e,t,r,i,k,a) {{
+                    m[i]=m[i]||function(){{ (m[i].a=m[i].a||[]).push(arguments) }};
+                    m[i].l=1*new Date();
 
-                // 1) Stub ym (очередь) — как в официальном сниппете.
-                w.ym = w.ym || function() {{
-                    (w.ym.a = w.ym.a || []).push(arguments);
-                }};
-                w.ym.l = w.ym.l || (1 * new Date());
-
-                // 2) Подгружаем tag.js один раз.
-                var TAG_SRC = 'https://mc.yandex.ru/metrika/tag.js';
-                var scripts = d.getElementsByTagName('script');
-                for (var i = 0; i < scripts.length; i++) {{
-                    if (scripts[i].src === TAG_SRC) {{
-                        log('tag.js already present');
-                        break;
+                    var scripts = e.getElementsByTagName(t);
+                    for (var j = 0; j < scripts.length; j++) {{
+                        if (scripts[j].src === r) {{
+                            log('tag.js already present');
+                            return;
+                        }}
                     }}
-                }}
-                if (i === scripts.length) {{
-                    var s = d.createElement('script');
-                    s.async = true;
-                    s.src = TAG_SRC;
-                    var firstScript = scripts[0];
-                    if (firstScript && firstScript.parentNode) {{
-                        firstScript.parentNode.insertBefore(s, firstScript);
-                    }} else if (d.head) {{
-                        d.head.appendChild(s);
-                    }} else if (d.body) {{
-                        d.body.appendChild(s);
+
+                    k=e.createElement(t);
+                    a=scripts[0];
+                    k.async=1;
+                    k.src=r;
+
+                    if (a && a.parentNode) {{
+                        a.parentNode.insertBefore(k,a);
+                    }} else if (e.head) {{
+                        e.head.appendChild(k);
+                    }} else if (e.body) {{
+                        e.body.appendChild(k);
                     }}
+
                     log('tag.js injected');
-                }}
+                }})(w, d, 'script', 'https://mc.yandex.ru/metrika/tag.js', 'ym');
 
-                // 3) init только один раз на окно.
-                w.__ymInitialized = w.__ymInitialized || {{}};
-                if (!w.__ymInitialized[counterId]) {{
-                    w.__ymInitialized[counterId] = true;
-                    w.ym(counterId, 'init', {{
-                        ssr: true,
-                        webvisor: true,
-                        clickmap: true,
-                        ecommerce: 'dataLayer',
-                        accurateTrackBounce: true,
-                        trackLinks: true
-                    }});
-                    log('init queued');
-                }} else {{
-                    log('already initialized');
-                }}
+                w.ym(counterId, 'init', {{
+                    ssr: true,
+                    webvisor: true,
+                    clickmap: true,
+                    ecommerce: 'dataLayer',
+                    accurateTrackBounce: true,
+                    trackLinks: true
+                }});
+                log('init queued');
 
-                // Debug-only: ручной пиксель, чтобы увидеть /watch в Network
-                // и быстро понять, блокирует ли его расширение (ERR_BLOCKED_BY_CLIENT).
-                if (debugEnabled()) {{
-                    try {{
-                        var img = new Image(1, 1);
-                        img.referrerPolicy = 'no-referrer-when-downgrade';
-                        img.src = 'https://mc.yandex.ru/watch/' + counterId + '?debug=1&r=' + Math.random();
-                        log('debug pixel requested');
-                    }} catch (e) {{
-                        log('debug pixel error', e);
-                    }}
-                }}
+                // Явно отправляем первый hit на текущую страницу.
+                w.ym(counterId, 'hit', w.location.href, {{
+                    title: d.title || '',
+                    referer: d.referrer || ''
+                }});
+                log('hit queued', w.location.href);
+
+                w.__ymMetrikaInitialized[counterId] = true;
             }} catch (e) {{
-                log('error', e);
+                try {{ console.error('YAMETRIKA init error:', e); }} catch (_) {{}}
             }}
         }})();
         </script>
