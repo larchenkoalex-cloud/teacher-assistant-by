@@ -70,6 +70,20 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                 }}
             }}
 
+            function sendPixelFallback(counter, href, reason) {{
+                try {{
+                    var px = new Image();
+                    var src = 'https://mc.yandex.ru/watch/' + counter
+                        + '?rn=' + Date.now()
+                        + '&page-url=' + encodeURIComponent(href || '')
+                        + '&fallback=' + encodeURIComponent(reason || 'unknown');
+                    px.src = src;
+                    log('pixel fallback sent', src);
+                }} catch (e) {{
+                    log('pixel fallback error', e);
+                }}
+            }}
+
             try {{
                 w.__ymMetrikaState = w.__ymMetrikaState || {{
                     initialized: {{}},
@@ -140,6 +154,21 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                     }});
                     w.__ymMetrikaState.lastHit[counterId] = {{ href: href, ts: now }};
                     log('hit queued', href);
+
+                    // Если runtime Метрики не поднялся (tag.js заблокирован/не выполнился),
+                    // отправляем резервный пиксель, чтобы запрос /watch появился в Network.
+                    setTimeout(function() {{
+                        try {{
+                            var ymRuntimeReady = !!(w.Ya && w.Ya.Metrika2);
+                            if (!ymRuntimeReady) {{
+                                sendPixelFallback(counterId, href, 'runtime_not_ready');
+                            }} else {{
+                                log('metrika runtime ready');
+                            }}
+                        }} catch (e) {{
+                            sendPixelFallback(counterId, href, 'runtime_check_error');
+                        }}
+                    }}, 3500);
                 }} else {{
                     log('hit skipped (deduplicated)');
                 }}
