@@ -213,6 +213,23 @@ def inject_yandex_metrika(counter_id: int = YANDEX_METRIKA_COUNTER_ID) -> None:
                     attemptSend();
                     var intervalId = setInterval(attemptSend, intervalMs);
                     log('hit queued (will retry until runtime is ready)', href);
+
+                    // Гарантированный автотест: если через 4.5s ничего не отправлено,
+                    // посылаем принудительный авто-пиксель (чтобы гарантировать запись).
+                    setTimeout(function() {{
+                        try {{
+                            var already = !!(w.__ymMetrikaState.lastHit && w.__ymMetrikaState.lastHit[counterId]);
+                            if (!already) {{
+                                var src = 'https://mc.yandex.ru/watch/' + counterId + '?dbg=auto&rn=' + Date.now();
+                                (new Image()).src = src;
+                                log('auto pixel forced', src);
+                            }} else {{
+                                log('auto pixel skipped — already sent');
+                            }}
+                        }} catch (e) {{
+                            log('auto pixel error', e);
+                        }}
+                    }}, 4500);
                 }} else {{
                     log('hit skipped (deduplicated)');
                 }}
