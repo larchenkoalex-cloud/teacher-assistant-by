@@ -333,48 +333,7 @@ st.set_page_config(
 
 inject_yandex_metrika()
 
-# Временный видимый бейдж и панель отладки для проверки /watch и вызовов ym
-components.html(
-        """
-        <div id="ym_debug_panel" style="font-size:14px;display:flex;align-items:center;gap:8px">
-            <a href="https://metrika.yandex.ru/stat/?id=106785768" target="_blank" rel="noopener">
-                <img src="https://mc.yandex.ru/watch/106785768" style="border:0;height:18px" alt="Yandex.Metrika" />
-            </a>
-            <button id="ym_manual_pixel" style="padding:4px 8px">Send pixel</button>
-            <button id="ym_reach_goal" style="padding:4px 8px">ReachGoal</button>
-            <span id="ym_status" style="margin-left:8px;color:#666"></span>
-        </div>
-        <script>
-        (function(){
-            var counter = 106785768;
-            function log(msg){ try{ console.log('YAMETRIKA-DBG:', msg); }catch(e){} }
-            document.getElementById('ym_manual_pixel').addEventListener('click', function(){
-                var src = 'https://mc.yandex.ru/watch/' + counter + '?dbg=manual&rn=' + Date.now();
-                (new Image()).src = src;
-                log('manual pixel sent: '+src);
-                var s = document.getElementById('ym_status'); if(s) s.textContent = 'pixel sent';
-            });
-            document.getElementById('ym_reach_goal').addEventListener('click', function(){
-                try {
-                    var fn = (window.parent && window.parent.ym) ? window.parent.ym : window.ym;
-                    if (typeof fn === 'function') {
-                        fn(counter, 'reachGoal', 'dbg_button');
-                        log('reachGoal called');
-                        var s = document.getElementById('ym_status'); if(s) s.textContent = 'reachGoal called';
-                    } else {
-                        log('ym not found to call reachGoal');
-                        var s = document.getElementById('ym_status'); if(s) s.textContent = 'ym not found';
-                    }
-                } catch(e){
-                    log('reachGoal error '+e);
-                    var s = document.getElementById('ym_status'); if(s) s.textContent = 'error';
-                }
-            });
-        })();
-        </script>
-        """,
-        height=60,
-)
+# Debug panel removed — automatic hit/retry and fallback remains active.
 # Streamlit может запоминать состояние сайдбара в браузере и игнорировать
 # initial_sidebar_state на следующих запусках. Этот хак пытается свернуть
 # сайдбар на старте, проверяя фактическую видимость панели.
