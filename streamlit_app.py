@@ -373,18 +373,18 @@ def _ensure_clients_table(db_path: str = "teacher_assistant_visits.db"):
     con.close()
 
 def _record_client_from_query(db_path: str = "teacher_assistant_visits.db"):
-    params = st.experimental_get_query_params()
+    params = st.query_params
     client_id = params.get("ta_client_id", [None])[0]
     # diagnostic logging
     try:
         with open("visits_debug.log", "a", encoding="utf-8") as fh:
-            fh.write(f"{datetime.utcnow().isoformat()} QUERY_PARAMS: {params}\n")
+            fh.write(f"{datetime.now(timezone.utc).isoformat()} QUERY_PARAMS: {params}\n")
     except Exception:
         pass
     if not client_id:
         try:
             with open("visits_debug.log", "a", encoding="utf-8") as fh:
-                fh.write(f"{datetime.utcnow().isoformat()} no ta_client_id in query\n")
+                fh.write(f"{datetime.now(timezone.utc).isoformat()} no ta_client_id in query\n")
         except Exception:
             pass
         return
@@ -393,7 +393,7 @@ def _record_client_from_query(db_path: str = "teacher_assistant_visits.db"):
         return
     try:
         _ensure_clients_table(db_path)
-        now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         con = _sqlite3.connect(db_path, timeout=5)
         cur = con.cursor()
         cur.execute("SELECT visits FROM clients WHERE client_id = ?", (client_id,))
@@ -464,7 +464,7 @@ def _increment_page_open(db_path: str = "teacher_assistant_visits.db"):
         return
     try:
         _ensure_visits_table(db_path)
-        now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         con = _sqlite3.connect(db_path, timeout=5)
         cur = con.cursor()
         cur.execute("SELECT v FROM meta_visits WHERE k = 'page_views'")
