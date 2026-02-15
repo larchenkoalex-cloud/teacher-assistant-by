@@ -13,15 +13,23 @@ import streamlit as st
 import streamlit.components.v1 as components
 from bs4 import BeautifulSoup, NavigableString
 
-# Вставка Google Analytics (gtag.js)
+# Google Analytics (gtag.js)
 components.html("""
-<!-- Google tag (gtag.js) -->
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-7GKRGQ01Y1"></script>
 <script>
-    window.dataLayer = window.dataLayer || [];
-    function gtag(){dataLayer.push(arguments);} 
-    gtag('js', new Date());
-    gtag('config', 'G-7GKRGQ01Y1');
+window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+
+gtag('config', 'G-7GKRGQ01Y1', {
+    'page_path': window.location.pathname,
+});
+
+gtag('event', 'page_view', {
+    page_title: document.title,
+    page_location: window.location.href,
+    page_path: window.location.pathname
+});
 </script>
 """, height=0)
 
