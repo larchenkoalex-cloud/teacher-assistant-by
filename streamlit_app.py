@@ -13,6 +13,18 @@ import streamlit as st
 import streamlit.components.v1 as components
 from bs4 import BeautifulSoup, NavigableString
 
+# Вставка Google Analytics (gtag.js)
+components.html("""
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-7GKRGQ01Y1"></script>
+<script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);} 
+    gtag('js', new Date());
+    gtag('config', 'G-7GKRGQ01Y1');
+</script>
+""", height=0)
+
 try:
     from streamlit_quill import st_quill
 except Exception:  # pragma: no cover
