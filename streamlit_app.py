@@ -375,7 +375,18 @@ def _ensure_clients_table(db_path: str = "teacher_assistant_visits.db"):
 def _record_client_from_query(db_path: str = "teacher_assistant_visits.db"):
     params = st.experimental_get_query_params()
     client_id = params.get("ta_client_id", [None])[0]
+    # diagnostic logging
+    try:
+        with open("visits_debug.log", "a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.utcnow().isoformat()} QUERY_PARAMS: {params}\n")
+    except Exception:
+        pass
     if not client_id:
+        try:
+            with open("visits_debug.log", "a", encoding="utf-8") as fh:
+                fh.write(f"{datetime.utcnow().isoformat()} no ta_client_id in query\n")
+        except Exception:
+            pass
         return
     session_key = f"_ta_client_recorded_{client_id}"
     if st.session_state.get(session_key):
@@ -418,6 +429,11 @@ def _record_client_from_query(db_path: str = "teacher_assistant_visits.db"):
             except Exception:
                 pass
         st.session_state[session_key] = True
+        # обновим отображаемое значение уникальных посетителей
+        try:
+            st.session_state["_ta_visit_unique"] = _get_unique_total(db_path)
+        except Exception:
+            pass
     except Exception:
         pass
 
