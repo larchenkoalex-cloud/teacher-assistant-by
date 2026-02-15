@@ -13,8 +13,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 from bs4 import BeautifulSoup, NavigableString
 
-
-
 try:
     from streamlit_quill import st_quill
 except Exception:  # pragma: no cover
@@ -119,6 +117,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
 # Streamlit может запоминать состояние сайдбара в браузере и игнорировать
 # initial_sidebar_state на следующих запусках. Этот хак пытается свернуть
 # сайдбар на старте, проверяя фактическую видимость панели.

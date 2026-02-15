@@ -2,57 +2,13 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Python: Run Current File",
-      "type": "python",
-      "request": "launch",
-      "program": "${file}",
-      "console": "integratedTerminal",
-      "justMyCode": false
-    }
-    ,
-    {
-      "name": "Python: Streamlit Current File",
-      "type": "python",
-      "request": "launch",
-      "module": "streamlit",
-      "args": ["run", "${file}"],
-      "console": "integratedTerminal",
-      "justMyCode": false
-    }
-  ]
-}
-{
-  "version": "0.2.0",
-  "configurations": [
-    
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    {
       "name": "Streamlit: Run app",
       "type": "python",
       "request": "launch",
       "module": "streamlit",
       "args": ["run", "streamlit_app.py", "--server.port=8501"],
       "console": "integratedTerminal",
-      "cwd": "${workspaceFolder}",
-      "env": {
-        // "DEEPSEEK_API_KEY": "your_key_here"
-      }
+      "cwd": "${workspaceFolder}"
     }
   ]
 }
