@@ -10,7 +10,6 @@ from pathlib import Path
 
 import requests
 import streamlit as st
-    # clients table removed — unique visitor tracking disabled
 import streamlit.components.v1 as components
 from bs4 import BeautifulSoup, NavigableString
 
@@ -22,7 +21,6 @@ except Exception:  # pragma: no cover
 from teacher_assistant.services import (
     LessonPlan,
     create_lesson_plan,
-def _record_client_id(client_id: str, db_path: str = "teacher_assistant_visits.db"):
     list_lesson_plans,
     create_user,
     get_user_by_username,
