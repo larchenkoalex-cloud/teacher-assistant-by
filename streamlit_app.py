@@ -202,28 +202,35 @@ components.html(
 
 # Клиентский идентификатор для уникальных визитов (хранится в localStorage).
 # При первом визите скрипт создаёт UUID и добавляет ?ta_client_id=... в URL (однократная перезагрузка).
-components.html(
+client_msg = components.html(
         """
         <script>
         (function(){
             try {
                 const key = 'ta_client_id';
-                const existing = localStorage.getItem(key);
+                const topWin = (window.parent && window.parent !== window) ? window.parent : window;
+                const storage = (topWin && topWin.localStorage) ? topWin.localStorage : localStorage;
+                const makeId = () => ((crypto && crypto.randomUUID) ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + Date.now().toString(36)));
+                let existing = null;
+                try { existing = storage.getItem(key); } catch (e) { try { existing = localStorage.getItem(key); } catch (e) { existing = null; } }
                 if (!existing) {
-                    const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + Date.now().toString(36));
-                    localStorage.setItem(key, id);
-                    const url = new URL(window.location.href);
-                    url.searchParams.set('ta_client_id', id);
-                    // Перезагрузим страницу один раз, чтобы сервер увидел id
-                    window.location.replace(url.toString());
-                } else {
-                    const url = new URL(window.location.href);
-                    if (url.searchParams.get('ta_client_id') !== existing) {
-                        // не перезагружаем — просто подставим параметр в историю
-                        url.searchParams.set('ta_client_id', existing);
-                        window.history.replaceState({}, '', url.toString());
-                    }
+                    existing = makeId();
+                    try { storage.setItem(key, existing); } catch (e) { try { localStorage.setItem(key, existing); } catch (e) {} }
                 }
+                // Отправляем значение в Streamlit через postMessage (component value)
+                try {
+                    window.parent.postMessage({isStreamlitMessage: true, type: 'streamlit:setComponentValue', value: {ta_client_id: existing}}, '*');
+                } catch (e) {}
+                // Пытаемся поддержать query param в истории родителя (без перезагрузки)
+                try {
+                    const url = new URL((topWin && topWin.location && topWin.location.href) || window.location.href);
+                    if (url.searchParams.get('ta_client_id') !== existing) {
+                        url.searchParams.set('ta_client_id', existing);
+                        if (topWin && topWin.history && topWin.history.replaceState) {
+                            topWin.history.replaceState({}, '', url.toString());
+                        }
+                    }
+                } catch (e) {}
             } catch (e) {
                 // молча
             }
@@ -233,6 +240,12 @@ components.html(
         height=0,
         width=0,
 )
+
+try:
+    if client_msg and isinstance(client_msg, dict) and client_msg.get("ta_client_id"):
+        _record_client_id(client_msg.get("ta_client_id"), db_path="teacher_assistant_visits.db")
+except Exception:
+    pass
 
 # Уменьшаем левый отступ основного контейнера (чтобы сократить расстояние до сайдбара/колонки регистрации)
 # Значение уменьшено примерно вдвое относительно дефолтного.
@@ -371,6 +384,57 @@ def _ensure_clients_table(db_path: str = "teacher_assistant_visits.db"):
     )
     con.commit()
     con.close()
+
+
+def _record_client_id(client_id: str, db_path: str = "teacher_assistant_visits.db"):
+    """Записать client_id напрямую в таблицу clients (без чтения из query params)."""
+    if not client_id:
+        return
+    session_key = f"_ta_client_recorded_{client_id}"
+    if st.session_state.get(session_key):
+        return
+    try:
+        _ensure_clients_table(db_path)
+        now = datetime.now(timezone.utc).isoformat()
+        con = _sqlite3.connect(db_path, timeout=5)
+        cur = con.cursor()
+        cur.execute("SELECT visits FROM clients WHERE client_id = ?", (client_id,))
+        row = cur.fetchone()
+        if row:
+            cur.execute(
+                "UPDATE clients SET last_seen = ?, visits = visits + 1 WHERE client_id = ?",
+                (now, client_id),
+            )
+            is_new = False
+        else:
+            cur.execute(
+                "INSERT INTO clients (client_id, first_seen, last_seen, visits) VALUES (?, ?, ?, 1)",
+                (client_id, now, now),
+            )
+            is_new = True
+        con.commit()
+        con.close()
+        if is_new:
+            try:
+                con = _sqlite3.connect(db_path, timeout=5)
+                cur = con.cursor()
+                cur.execute("SELECT v FROM meta_visits WHERE k = 'unique_visitors'")
+                r = cur.fetchone()
+                if r:
+                    cur.execute("UPDATE meta_visits SET v = v + 1, last_seen = ? WHERE k = 'unique_visitors'", (now,))
+                else:
+                    cur.execute("INSERT INTO meta_visits (k, v, last_seen) VALUES ('unique_visitors', 1, ?)", (now,))
+                con.commit()
+                con.close()
+            except Exception:
+                pass
+        st.session_state[session_key] = True
+        try:
+            st.session_state["_ta_visit_unique"] = _get_unique_total(db_path)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 def _record_client_from_query(db_path: str = "teacher_assistant_visits.db"):
     params = st.query_params
