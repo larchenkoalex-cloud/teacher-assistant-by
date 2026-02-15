@@ -13,26 +13,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 from bs4 import BeautifulSoup, NavigableString
 
-# Google Analytics (gtag.js)
-components.html("""
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-7GKRGQ01Y1"></script>
-<script>
-window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-
-gtag('config', 'G-7GKRGQ01Y1', {
-    'page_path': window.location.pathname,
-});
-
-gtag('event', 'page_view', {
-    page_title: document.title,
-    page_location: window.location.href,
-    page_path: window.location.pathname
-});
-</script>
-""", height=0)
-
 try:
     from streamlit_quill import st_quill
 except Exception:  # pragma: no cover
@@ -66,6 +46,40 @@ try:
     from teacher_assistant.components.quill_editor import quill_editor
 except Exception:  # pragma: no cover
     quill_editor = None
+
+
+# Google Analytics Measurement Protocol helper
+# Measurement ID и секрет можно переопределить через переменную окружения `GA_API_SECRET`
+MEASUREMENT_ID = "G-7GKRGQ01Y1"
+# Вставленный секрет (если нужно, переопределяется переменной окружения `GA_API_SECRET`)
+API_SECRET = os.getenv("GA_API_SECRET", "rFygIPgKTRGCTaddrQE2JA")
+
+def send_pageview():
+    client_id = str(uuid.uuid4())
+
+    url = f"https://www.google-analytics.com/mp/collect?measurement_id={MEASUREMENT_ID}&api_secret={API_SECRET}"
+
+    payload = {
+        "client_id": client_id,
+        "events": [{
+            "name": "page_view",
+            "params": {
+                "page_location": "https://teacher-assistant-bygit-mysuefzyvarawcz6hkan7h.streamlit.app",
+                "page_title": "Teacher Assistant",
+            }
+        }]
+    }
+    try:
+        requests.post(url, json=payload, timeout=3)
+    except Exception:
+        logging.exception("Failed to send Google Analytics pageview")
+
+
+# Отправляем page_view при старте приложения (можно отключить/перенести при необходимости)
+try:
+    send_pageview()
+except Exception:
+    pass
 
 
 def generate_with_deepseek(api_key: str, prompt: str, model: str = "deepseek/deepseek-chat") -> dict:
