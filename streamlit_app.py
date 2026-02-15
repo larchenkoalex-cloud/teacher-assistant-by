@@ -21,6 +21,7 @@ except Exception:  # pragma: no cover
 from teacher_assistant.services import (
     LessonPlan,
     create_lesson_plan,
+    init_db,
     list_lesson_plans,
     create_user,
     get_user_by_username,
