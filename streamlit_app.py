@@ -48,40 +48,6 @@ except Exception:  # pragma: no cover
     quill_editor = None
 
 
-# Google Analytics Measurement Protocol helper
-# Measurement ID и секрет можно переопределить через переменную окружения `GA_API_SECRET`
-MEASUREMENT_ID = "G-7GKRGQ01Y1"
-# Вставленный секрет (если нужно, переопределяется переменной окружения `GA_API_SECRET`)
-API_SECRET = os.getenv("GA_API_SECRET", "rFygIPgKTRGCTaddrQE2JA")
-
-def send_pageview():
-    client_id = str(uuid.uuid4())
-
-    url = f"https://www.google-analytics.com/mp/collect?measurement_id={MEASUREMENT_ID}&api_secret={API_SECRET}"
-
-    payload = {
-        "client_id": client_id,
-        "events": [{
-            "name": "page_view",
-            "params": {
-                "page_location": "https://teacher-assistant-bygit-mysuefzyvarawcz6hkan7h.streamlit.app",
-                "page_title": "Teacher Assistant",
-            }
-        }]
-    }
-    try:
-        requests.post(url, json=payload, timeout=3)
-    except Exception:
-        logging.exception("Failed to send Google Analytics pageview")
-
-
-# Отправляем page_view при старте приложения (можно отключить/перенести при необходимости)
-try:
-    send_pageview()
-except Exception:
-    pass
-
-
 def generate_with_deepseek(api_key: str, prompt: str, model: str = "deepseek/deepseek-chat") -> dict:
     """Универсальная функция для запросов к DeepSeek через OpenRouter.
 
@@ -338,6 +304,91 @@ st.markdown(
 
 # Инициализация БД (SQLite по умолчанию, можно заменить на Postgres через DATABASE_URL)
 init_db()
+
+import sqlite3 as _sqlite3
+
+def _ensure_visits_table(db_path: str = "teacher_assistant_visits.db"):
+    con = _sqlite3.connect(db_path, timeout=5)
+    cur = con.cursor()
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS meta_visits (
+        k TEXT PRIMARY KEY,
+        v INTEGER,
+        last_seen TEXT
+    )
+    """
+    )
+    con.commit()
+    con.close()
+
+def _increment_page_open(db_path: str = "teacher_assistant_visits.db"):
+    # Считаем только один раз за сессию рендера Streamlit
+    if st.session_state.get("_ta_visit_counted"):
+        return
+    try:
+        _ensure_visits_table(db_path)
+        now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+        con = _sqlite3.connect(db_path, timeout=5)
+        cur = con.cursor()
+        cur.execute("SELECT v FROM meta_visits WHERE k = 'page_views'")
+        row = cur.fetchone()
+        if row:
+            cur.execute(
+                "UPDATE meta_visits SET v = v + 1, last_seen = ? WHERE k = 'page_views'",
+                (now,),
+            )
+        else:
+            cur.execute(
+                "INSERT INTO meta_visits (k, v, last_seen) VALUES ('page_views', 1, ?)", (now,)
+            )
+        con.commit()
+        cur.execute("SELECT v FROM meta_visits WHERE k = 'page_views'")
+        total = cur.fetchone()[0]
+        con.close()
+        st.session_state["_ta_visit_counted"] = True
+        st.session_state["_ta_visit_total"] = int(total)
+    except Exception:
+        # При ошибках статистики не ломаем приложение
+        st.session_state["_ta_visit_total"] = st.session_state.get("_ta_visit_total", 0)
+
+def _get_visit_total(db_path: str = "teacher_assistant_visits.db") -> int:
+    try:
+        _ensure_visits_table(db_path)
+        con = _sqlite3.connect(db_path, timeout=5)
+        cur = con.cursor()
+        cur.execute("SELECT v FROM meta_visits WHERE k = 'page_views'")
+        row = cur.fetchone()
+        con.close()
+        return int(row[0]) if row else 0
+    except Exception:
+        return int(st.session_state.get("_ta_visit_total", 0) or 0)
+
+# Увеличиваем счётчик при первой загрузке пользователя в этой сессии
+_increment_page_open(db_path="teacher_assistant_visits.db")
+
+def _render_visit_counter():
+    count = st.session_state.get("_ta_visit_total") or _get_visit_total()
+    st.markdown(
+        f"""<style>
+#ta-visit-counter {{
+ position: fixed;
+ right: 1rem;
+ bottom: 1rem;
+ background: rgba(255,255,255,0.92);
+ padding: 6px 10px;
+ border-radius: 8px;
+ box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+ font-size: 0.95rem;
+ z-index: 2147483647;
+}}
+</style>
+<div id="ta-visit-counter">Открытий страницы: <strong>{count}</strong></div>""",
+        unsafe_allow_html=True,
+    )
+
+# Отрисовываем счётчик (внизу справа)
+_render_visit_counter()
 
 st.title("Твой ассистет — помощник для учителя")
 st.markdown("Используйте форму слева для генерации плана урока и предпросмотр справа для правок.")
