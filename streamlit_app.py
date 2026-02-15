@@ -10,6 +10,7 @@ from pathlib import Path
 
 import requests
 import streamlit as st
+    # clients table removed — unique visitor tracking disabled
 import streamlit.components.v1 as components
 from bs4 import BeautifulSoup, NavigableString
 
@@ -21,7 +22,7 @@ except Exception:  # pragma: no cover
 from teacher_assistant.services import (
     LessonPlan,
     create_lesson_plan,
-    init_db,
+def _record_client_id(client_id: str, db_path: str = "teacher_assistant_visits.db"):
     list_lesson_plans,
     create_user,
     get_user_by_username,
@@ -70,6 +71,7 @@ def generate_with_deepseek(api_key: str, prompt: str, model: str = "deepseek/dee
 
     timeouts = [60, 90, 120]
     last_exc = None
+    # unique visitor recording removed
     for to in timeouts:
         try:
             resp = requests.post(
@@ -200,52 +202,7 @@ components.html(
             width=0,
     )
 
-# Клиентский идентификатор для уникальных визитов (хранится в localStorage).
-# При первом визите скрипт создаёт UUID и добавляет ?ta_client_id=... в URL (однократная перезагрузка).
-client_msg = components.html(
-        """
-        <script>
-        (function(){
-            try {
-                const key = 'ta_client_id';
-                const topWin = (window.parent && window.parent !== window) ? window.parent : window;
-                const storage = (topWin && topWin.localStorage) ? topWin.localStorage : localStorage;
-                const makeId = () => ((crypto && crypto.randomUUID) ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + Date.now().toString(36)));
-                let existing = null;
-                try { existing = storage.getItem(key); } catch (e) { try { existing = localStorage.getItem(key); } catch (e) { existing = null; } }
-                if (!existing) {
-                    existing = makeId();
-                    try { storage.setItem(key, existing); } catch (e) { try { localStorage.setItem(key, existing); } catch (e) {} }
-                }
-                // Отправляем значение в Streamlit через postMessage (component value)
-                try {
-                    window.parent.postMessage({isStreamlitMessage: true, type: 'streamlit:setComponentValue', value: {ta_client_id: existing}}, '*');
-                } catch (e) {}
-                // Пытаемся поддержать query param в истории родителя (без перезагрузки)
-                try {
-                    const url = new URL((topWin && topWin.location && topWin.location.href) || window.location.href);
-                    if (url.searchParams.get('ta_client_id') !== existing) {
-                        url.searchParams.set('ta_client_id', existing);
-                        if (topWin && topWin.history && topWin.history.replaceState) {
-                            topWin.history.replaceState({}, '', url.toString());
-                        }
-                    }
-                } catch (e) {}
-            } catch (e) {
-                // молча
-            }
-        })();
-        </script>
-        """,
-        height=0,
-        width=0,
-)
-
-try:
-    if client_msg and isinstance(client_msg, dict) and client_msg.get("ta_client_id"):
-        _record_client_id(client_msg.get("ta_client_id"), db_path="teacher_assistant_visits.db")
-except Exception:
-    pass
+# Убрана логика уникальных посетителей — оставляем только счётчик открытий страниц.
 
 # Уменьшаем левый отступ основного контейнера (чтобы сократить расстояние до сайдбара/колонки регистрации)
 # Значение уменьшено примерно вдвое относительно дефолтного.
@@ -370,20 +327,8 @@ def _ensure_visits_table(db_path: str = "teacher_assistant_visits.db"):
     con.close()
 
 def _ensure_clients_table(db_path: str = "teacher_assistant_visits.db"):
-    con = _sqlite3.connect(db_path, timeout=5)
-    cur = con.cursor()
-    cur.execute(
-        """
-    CREATE TABLE IF NOT EXISTS clients (
-        client_id TEXT PRIMARY KEY,
-        first_seen TEXT,
-        last_seen TEXT,
-        visits INTEGER
-    )
-    """
-    )
-    con.commit()
-    con.close()
+    # unique visitors tracking removed; keep function for compatibility
+    return
 
 
 def _record_client_id(client_id: str, db_path: str = "teacher_assistant_visits.db"):
@@ -500,27 +445,11 @@ def _record_client_from_query(db_path: str = "teacher_assistant_visits.db"):
             pass
     except Exception:
         pass
+    # client-from-query removed — unique visitors disabled
 
 def _get_unique_total(db_path: str = "teacher_assistant_visits.db") -> int:
-    try:
-        _ensure_clients_table(db_path)
-        con = _sqlite3.connect(db_path, timeout=5)
-        cur = con.cursor()
-        cur.execute("SELECT COUNT(*) FROM clients")
-        row = cur.fetchone()
-        con.close()
-        return int(row[0]) if row else 0
-    except Exception:
-        # fallback to meta_visits if present
-        try:
-            con = _sqlite3.connect(db_path, timeout=5)
-            cur = con.cursor()
-            cur.execute("SELECT v FROM meta_visits WHERE k = 'unique_visitors'")
-            row = cur.fetchone()
-            con.close()
-            return int(row[0]) if row else int(st.session_state.get("_ta_visit_unique", 0) or 0)
-        except Exception:
-            return int(st.session_state.get("_ta_visit_unique", 0) or 0)
+    # unique visitors tracking disabled
+    return 0
 
 def _increment_page_open(db_path: str = "teacher_assistant_visits.db"):
     # Считаем только один раз за сессию рендера Streamlit
@@ -565,12 +494,10 @@ def _get_visit_total(db_path: str = "teacher_assistant_visits.db") -> int:
         return int(st.session_state.get("_ta_visit_total", 0) or 0)
 
 # Увеличиваем счётчик при первой загрузке пользователя в этой сессии
-_record_client_from_query(db_path="teacher_assistant_visits.db")
 _increment_page_open(db_path="teacher_assistant_visits.db")
 
 def _render_visit_counter():
     total = st.session_state.get("_ta_visit_total") or _get_visit_total()
-    unique = st.session_state.get("_ta_visit_unique") or _get_unique_total()
     st.markdown(
         f"""<style>
 #ta-visit-counter {{
@@ -586,7 +513,7 @@ def _render_visit_counter():
  z-index: 2147483647;
 }}
 </style>
-<div id="ta-visit-counter">Открытий страницы: <strong>{total}</strong><br>Уникальных посетителей: <strong>{unique}</strong></div>""",
+<div id="ta-visit-counter">Открытий страницы: <strong>{total}</strong></div>""",
         unsafe_allow_html=True,
     )
 
