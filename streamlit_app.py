@@ -200,6 +200,40 @@ components.html(
             width=0,
     )
 
+# Клиентский идентификатор для уникальных визитов (хранится в localStorage).
+# При первом визите скрипт создаёт UUID и добавляет ?ta_client_id=... в URL (однократная перезагрузка).
+components.html(
+        """
+        <script>
+        (function(){
+            try {
+                const key = 'ta_client_id';
+                const existing = localStorage.getItem(key);
+                if (!existing) {
+                    const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + Date.now().toString(36));
+                    localStorage.setItem(key, id);
+                    const url = new URL(window.location.href);
+                    url.searchParams.set('ta_client_id', id);
+                    // Перезагрузим страницу один раз, чтобы сервер увидел id
+                    window.location.replace(url.toString());
+                } else {
+                    const url = new URL(window.location.href);
+                    if (url.searchParams.get('ta_client_id') !== existing) {
+                        // не перезагружаем — просто подставим параметр в историю
+                        url.searchParams.set('ta_client_id', existing);
+                        window.history.replaceState({}, '', url.toString());
+                    }
+                }
+            } catch (e) {
+                // молча
+            }
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+)
+
 # Уменьшаем левый отступ основного контейнера (чтобы сократить расстояние до сайдбара/колонки регистрации)
 # Значение уменьшено примерно вдвое относительно дефолтного.
 # Добавляем стиль для узкого окна потоковой генерации, чтобы оно было фиксировано по высоте
@@ -322,6 +356,92 @@ def _ensure_visits_table(db_path: str = "teacher_assistant_visits.db"):
     con.commit()
     con.close()
 
+def _ensure_clients_table(db_path: str = "teacher_assistant_visits.db"):
+    con = _sqlite3.connect(db_path, timeout=5)
+    cur = con.cursor()
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS clients (
+        client_id TEXT PRIMARY KEY,
+        first_seen TEXT,
+        last_seen TEXT,
+        visits INTEGER
+    )
+    """
+    )
+    con.commit()
+    con.close()
+
+def _record_client_from_query(db_path: str = "teacher_assistant_visits.db"):
+    params = st.experimental_get_query_params()
+    client_id = params.get("ta_client_id", [None])[0]
+    if not client_id:
+        return
+    session_key = f"_ta_client_recorded_{client_id}"
+    if st.session_state.get(session_key):
+        return
+    try:
+        _ensure_clients_table(db_path)
+        now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+        con = _sqlite3.connect(db_path, timeout=5)
+        cur = con.cursor()
+        cur.execute("SELECT visits FROM clients WHERE client_id = ?", (client_id,))
+        row = cur.fetchone()
+        if row:
+            cur.execute(
+                "UPDATE clients SET last_seen = ?, visits = visits + 1 WHERE client_id = ?",
+                (now, client_id),
+            )
+            is_new = False
+        else:
+            cur.execute(
+                "INSERT INTO clients (client_id, first_seen, last_seen, visits) VALUES (?, ?, ?, 1)",
+                (client_id, now, now),
+            )
+            is_new = True
+        con.commit()
+        con.close()
+        # если это новый клиент — можно опционально хранить отдельный мета-ключ
+        if is_new:
+            # обновим meta_visits.unique_visitors (если есть) иначе оставим подсчёт по таблице
+            try:
+                con = _sqlite3.connect(db_path, timeout=5)
+                cur = con.cursor()
+                cur.execute("SELECT v FROM meta_visits WHERE k = 'unique_visitors'")
+                r = cur.fetchone()
+                if r:
+                    cur.execute("UPDATE meta_visits SET v = v + 1 WHERE k = 'unique_visitors'")
+                else:
+                    cur.execute("INSERT INTO meta_visits (k, v, last_seen) VALUES ('unique_visitors', 1, ?)", (now,))
+                con.commit()
+                con.close()
+            except Exception:
+                pass
+        st.session_state[session_key] = True
+    except Exception:
+        pass
+
+def _get_unique_total(db_path: str = "teacher_assistant_visits.db") -> int:
+    try:
+        _ensure_clients_table(db_path)
+        con = _sqlite3.connect(db_path, timeout=5)
+        cur = con.cursor()
+        cur.execute("SELECT COUNT(*) FROM clients")
+        row = cur.fetchone()
+        con.close()
+        return int(row[0]) if row else 0
+    except Exception:
+        # fallback to meta_visits if present
+        try:
+            con = _sqlite3.connect(db_path, timeout=5)
+            cur = con.cursor()
+            cur.execute("SELECT v FROM meta_visits WHERE k = 'unique_visitors'")
+            row = cur.fetchone()
+            con.close()
+            return int(row[0]) if row else int(st.session_state.get("_ta_visit_unique", 0) or 0)
+        except Exception:
+            return int(st.session_state.get("_ta_visit_unique", 0) or 0)
+
 def _increment_page_open(db_path: str = "teacher_assistant_visits.db"):
     # Считаем только один раз за сессию рендера Streamlit
     if st.session_state.get("_ta_visit_counted"):
@@ -365,10 +485,12 @@ def _get_visit_total(db_path: str = "teacher_assistant_visits.db") -> int:
         return int(st.session_state.get("_ta_visit_total", 0) or 0)
 
 # Увеличиваем счётчик при первой загрузке пользователя в этой сессии
+_record_client_from_query(db_path="teacher_assistant_visits.db")
 _increment_page_open(db_path="teacher_assistant_visits.db")
 
 def _render_visit_counter():
-    count = st.session_state.get("_ta_visit_total") or _get_visit_total()
+    total = st.session_state.get("_ta_visit_total") or _get_visit_total()
+    unique = st.session_state.get("_ta_visit_unique") or _get_unique_total()
     st.markdown(
         f"""<style>
 #ta-visit-counter {{
@@ -384,7 +506,7 @@ def _render_visit_counter():
  z-index: 2147483647;
 }}
 </style>
-<div id="ta-visit-counter">Открытий страницы: <strong>{count}</strong></div>""",
+<div id="ta-visit-counter">Открытий страницы: <strong>{total}</strong><br>Уникальных посетителей: <strong>{unique}</strong></div>""",
         unsafe_allow_html=True,
     )
 
