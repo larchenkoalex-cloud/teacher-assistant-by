@@ -373,7 +373,8 @@ def _render_visit_counter():
         f"""<style>
 #ta-visit-counter {{
  position: fixed;
- right: 1rem;
+ /* Сдвигаем влево примерно на 5 см относительно прежнего правого отступа */
+ right: calc(1rem + 5cm);
  bottom: 1rem;
  background: rgba(255,255,255,0.92);
  padding: 6px 10px;
