@@ -518,6 +518,17 @@ st.markdown(
         font-weight: 700 !important;
         line-height: 1.1 !important;
     }
+    /* Классические стрелки у числовых полей (спиннеров) */
+    input[type="number"] {
+        appearance: auto !important;
+        -moz-appearance: number-input !important;
+    }
+    input[type="number"]::-webkit-outer-spin-button,
+    input[type="number"]::-webkit-inner-spin-button {
+        -webkit-appearance: auto !important;
+        opacity: 1 !important;
+        margin: 0 !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -2011,8 +2022,8 @@ if st.session_state.get("show_recent_plans", False):
 if app_mode == "Пользовательский режим":
     st.header("Дополнительный материал для урока")
 
-    tab_handout, tab_quiz, tab_talk, tab_concept = st.tabs(
-        ["Раздаточный материал", "Викторина", "Беседа", "Конспект"]
+    tab_handout, tab_quiz, tab_test, tab_talk, tab_concept = st.tabs(
+        ["Раздаточный материал", "Викторина", "Тест", "Беседа", "Конспект"]
     )
 
     # ----- Вкладка: Конспект (текущая работа с планом) -----
@@ -2587,7 +2598,12 @@ if app_mode == "Пользовательский режим":
             if answer_key:
                 lines.append("---")
                 lines.append("# Ключ ответов")
-                lines.extend(answer_key)
+                # Добавляем ключ ответов как сырые HTML-параграфы, чтобы
+                # при конвертации Markdown->HTML->DOCX они не были объединены
+                # в продолжающийся нумерованный список. Это гарантирует,
+                # что нумерация начнётся заново в разделе ключа.
+                for ak in answer_key:
+                    lines.append(f"<p>{ak}</p>")
 
             return "\n".join(lines).strip() + "\n"
 
@@ -2680,6 +2696,258 @@ if app_mode == "Пользовательский режим":
                     st.error(f"Не удалось собрать .docx: {e}")
 
         # Пустой шаблон для ручного заполнения удалён по просьбе пользователя.
+        
+    # ----- Вкладка: Тест -----
+    with tab_test:
+        st.subheader("Тест (сбор параметров)")
+
+        # Берём тему/предмет/класс из раздатки или формы плана
+        test_subject = (
+            st.session_state.get("handout_subject")
+            or st.session_state.get("gen_subject")
+            or SUBJECTS[0]
+        )
+        test_grade = (
+            st.session_state.get("handout_grade")
+            or st.session_state.get("gen_grade")
+            or GRADES[0]
+        )
+        test_topic = (
+            (st.session_state.get("handout_topic") or "").strip()
+            or (st.session_state.get("gen_topic") or "").strip()
+        )
+
+        st.markdown(
+            f"<div style='font-size:18px;color:#000;font-weight:600'>Используем для теста: {html.escape(str(test_subject))} • {html.escape(str(test_grade))} • Тема: {html.escape(str(test_topic or '—'))}</div>",
+            unsafe_allow_html=True,
+        )
+
+        def _compact_spinner(container, label: str, key: str, default: int = 2, max_value: int = 100, on_change=None) -> int:
+            left_col, right_col = container.columns([6, 1])
+            left_col.markdown(label)
+            # If the key already exists in session_state, avoid passing an explicit
+            # `value` to the widget — Streamlit will initialize the widget from
+            # session_state. Passing both causes a warning about default vs session state.
+            if key in st.session_state:
+                value = right_col.number_input(
+                    label,
+                    min_value=0,
+                    max_value=max_value,
+                    step=1,
+                    format="%d",
+                    key=key,
+                    label_visibility="collapsed",
+                    on_change=on_change,
+                )
+            else:
+                value = right_col.number_input(
+                    label,
+                    min_value=0,
+                    max_value=max_value,
+                    value=int(default),
+                    step=1,
+                    format="%d",
+                    key=key,
+                    label_visibility="collapsed",
+                    on_change=on_change,
+                )
+            return int(value)
+
+        info_col1, info_col2, info_col3 = st.columns(3)
+
+        with info_col1:
+            st.markdown(
+                "<div style='margin-top:0.2rem;margin-bottom:0.1rem;font-weight:800'>Цель теста:</div>",
+                unsafe_allow_html=True,
+            )
+            test_goal = st.selectbox(
+                "Цель теста",
+                [
+                    "Текущая проверка",
+                    "Итоговый контроль",
+                    "Входная диагностика",
+                    "Самопроверка",
+                    "Подготовка к контрольной работе",
+                ],
+                index=0,
+                key="test_goal",
+                label_visibility="collapsed",
+            )
+
+            st.markdown("**Типы вопросов (закрытые):**")
+            test_single = _compact_spinner(info_col1, "Выбор одного ответа (1 правильный, 3-4 варианта)", "test_single")
+            test_multiple = _compact_spinner(info_col1, "Выбор нескольких ответов", "test_multiple")
+            test_truefalse = _compact_spinner(info_col1, "Верно/Неверно", "test_truefalse")
+            test_find_extra = _compact_spinner(info_col1, "Найди лишнее", "test_find_extra")
+
+        with info_col2:
+            st.markdown("**Типы вопросов (открытые):**")
+            test_match = _compact_spinner(info_col2, "На соответствие (соединить колонки)", "test_match", default=1)
+            test_sequence = _compact_spinner(info_col2, "На последовательность (расставить по порядку)", "test_sequence", default=1)
+            test_short = _compact_spinner(info_col2, "Краткий ответ (слово/словосочетание)", "test_short", default=1)
+            test_long = _compact_spinner(info_col2, "Развёрнутый ответ (1-2 предложения)", "test_long", default=1)
+            # Переносим блок примечаний в средний столбец
+            st.markdown("<div style='font-weight:600;margin-bottom:0.2rem'>Доп. примечания (опционально):</div>", unsafe_allow_html=True)
+            test_notes = st.text_area("Доп. примечания (опционально)", value="", key="test_notes", height=130, label_visibility="collapsed")
+
+            # Наглядные вопросы удалены по запросу пользователя
+            test_by_image = 0
+            test_by_table = 0
+
+        # Авто-распределение по сложности в зависимости от общего числа вопросов
+        def _mark_diff_manual():
+            st.session_state["test_diff_manual"] = True
+
+        # Собираем общее количество вопросов из полей выше
+        total_questions = sum(
+            int(x or 0)
+            for x in (
+                st.session_state.get("test_single"),
+                st.session_state.get("test_multiple"),
+                st.session_state.get("test_truefalse"),
+                st.session_state.get("test_find_extra"),
+                st.session_state.get("test_match"),
+                st.session_state.get("test_sequence"),
+                st.session_state.get("test_short"),
+                st.session_state.get("test_long"),
+            )
+        )
+
+        # Инициализация флага автозаполнения
+        if "test_diff_manual" not in st.session_state:
+            st.session_state["test_diff_manual"] = False
+
+        # Если пользователь не редактировал вручную — установим дефолтное распределение
+        if not st.session_state.get("test_diff_manual", False):
+            # Процентное распределение: базовый 60%, повышенный 30%, высокий 10% (в сумме = total)
+            basic = int(round(total_questions * 0.6))
+            mid = int(round(total_questions * 0.3))
+            high = max(0, total_questions - basic - mid)
+            st.session_state["test_diff_basic"] = basic
+            st.session_state["test_diff_mid"] = mid
+            st.session_state["test_diff_high"] = high
+
+        with info_col3:
+            st.markdown("**Распределение по сложности:**")
+            diff_basic = _compact_spinner(
+                info_col3,
+                "Базовый уровень",
+                "test_diff_basic",
+                default=st.session_state.get("test_diff_basic", 2),
+                max_value=200,
+                on_change=_mark_diff_manual,
+            )
+            diff_mid = _compact_spinner(
+                info_col3,
+                "Повышенный уровень",
+                "test_diff_mid",
+                default=st.session_state.get("test_diff_mid", 2),
+                max_value=200,
+                on_change=_mark_diff_manual,
+            )
+            diff_high = _compact_spinner(
+                info_col3,
+                "Высокий уровень",
+                "test_diff_high",
+                default=st.session_state.get("test_diff_high", 2),
+                max_value=200,
+                on_change=_mark_diff_manual,
+            )
+
+            st.markdown("**Дополнительные пожелания:**")
+            add_keys = st.checkbox("Добавить ключи с ответами (отдельно)", value=True, key="test_add_keys")
+            add_comments = st.checkbox("Добавить комментарии к сложным вопросам", value=False, key="test_add_comments")
+            add_variants = st.checkbox("Сделать 2 варианта (одинаковой сложности)", value=False, key="test_add_variants")
+            add_local = st.checkbox("Учесть местный / региональный контекст (Беларусь)", value=False, key="test_add_local")
+
+            # Примечания перенесены в средний столбец
+
+        gen_cols = st.columns([1, 1, 2])
+        if gen_cols[0].button("Сгенерировать тест (ИИ)", key="test_generate_btn"):
+            api_key_local = st.session_state.get("api_key") or os.getenv("OPENROUTER_API_KEY")
+            if not api_key_local:
+                st.error("Укажите OpenRouter API key в админ-панели (sk-or-v1-...).")
+            elif not test_topic:
+                st.warning("Сначала задайте тему (в форме плана урока).")
+            else:
+                # Собираем промпт по шаблону пользователя
+                prompt_lines = []
+                prompt_lines.append("Ты — экзаменатор/методист. Составь тест по заданной теме.")
+                prompt_lines.append(f"Предмет: {test_subject}.")
+                prompt_lines.append(f"Класс: {test_grade}.")
+                prompt_lines.append("ТЕМА:")
+                prompt_lines.append(f'"""\n{test_topic}\n"""')
+                # test_goal — единый выбор
+                prompt_lines.append("Цель теста: " + (test_goal or "—"))
+                prompt_lines.append("Типы вопросов и количества:")
+                prompt_lines.append(f"- Выбор одного ответа: {int(test_single)}")
+                prompt_lines.append(f"- Выбор нескольких ответов: {int(test_multiple)}")
+                prompt_lines.append(f"- Верно/Неверно: {int(test_truefalse)}")
+                prompt_lines.append(f"- Найди лишнее: {int(test_find_extra)}")
+                prompt_lines.append(f"- На соответствие: {int(test_match)}")
+                prompt_lines.append(f"- На последовательность: {int(test_sequence)}")
+                prompt_lines.append(f"- Краткий ответ: {int(test_short)}")
+                prompt_lines.append(f"- Развёрнутый ответ: {int(test_long)}")
+                # Наглядные вопросы опущены
+                prompt_lines.append("Распределение по сложности:")
+                prompt_lines.append(f"- Базовый: {int(diff_basic)}; Повышенный: {int(diff_mid)}; Высокий: {int(diff_high)}")
+                prompt_lines.append("Доп. пожелания:")
+                if add_keys:
+                    prompt_lines.append("- Добавить ключ ответов отдельно")
+                if add_comments:
+                    prompt_lines.append("- Добавить комментарии к сложным вопросам")
+                if add_variants:
+                    prompt_lines.append("- Сделать 2 варианта одинаковой сложности")
+                if add_local:
+                    prompt_lines.append("- Учитывать местный контекст: Беларусь")
+                if test_notes and test_notes.strip():
+                    prompt_lines.append(f"Примечания учителя: {test_notes.strip()}")
+
+                prompt_text = "\n".join(prompt_lines)
+                with st.spinner("Генерирую тест..."):
+                    resp = generate_with_deepseek(api_key_local, prompt_text)
+                text = (
+                    resp.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+                st.session_state["test_generated_md"] = (text or "").strip()
+
+        if gen_cols[1].button("Очистить", key="test_clear_btn"):
+            st.session_state["test_generated_md"] = ""
+
+        if st.session_state.get("test_generated_md"):
+            st.markdown("### Результат (можно править)")
+            st.session_state["test_generated_md"] = st.text_area(
+                "test_generated_md_editor",
+                value=st.session_state.get("test_generated_md", ""),
+                height=420,
+                label_visibility="collapsed",
+            )
+
+            try:
+                test_docx_title = _normalize_material_filename(
+                    grade=test_grade,
+                    kind="тест",
+                    topic=test_topic or "тест",
+                    ext="docx",
+                )
+                src_md = st.session_state.get("test_generated_md") or ""
+                md_norm = normalize_ai_markdown(_postprocess_plan_text(src_md))
+                html_for_docx = quill_html_utils.sanitize_html_for_quill(markdown_to_html(md_norm))
+                bytes_docx = _html_to_docx_bytes(html_for_docx)
+
+                st.download_button(
+                    "Скачать тест (.docx)",
+                    data=bytes_docx,
+                    file_name=test_docx_title,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    on_click="ignore",
+                    key="test_download_docx_btn",
+                )
+            except Exception as e:
+                logging.exception("Error while converting test to docx")
+                st.error(f"Не удалось собрать .docx: {e}")
 
         # ----- Вкладка: Беседа -----
         with tab_talk:

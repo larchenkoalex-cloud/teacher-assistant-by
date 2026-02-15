@@ -45,3 +45,5 @@
 [stream_chat_completions] status=200 content-type=text/event-stream
 [stream_chat_completions] status=200 content-type=text/event-stream
 [stream_chat_completions] status=200 content-type=text/event-stream
+[stream_chat_completions] status=200 content-type=text/event-stream
+[stream_chat_completions] status=200 content-type=text/event-stream
