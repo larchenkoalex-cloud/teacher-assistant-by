@@ -519,8 +519,22 @@ def _render_visit_counter():
 # Отрисовываем счётчик (внизу справа)
 _render_visit_counter()
 
-st.title("Твой ассистет — помощник для учителя")
-st.markdown("Используйте форму слева для генерации плана урока и предпросмотр справа для правок.")
+st.markdown(
+    "<h1 style='text-align:center; margin-bottom:0.25rem;'>Готовый урок. Цифровой методист учителя.</h1>",
+    unsafe_allow_html=True,
+)
+st.markdown(
+    "<div style='font-size:160%; line-height:1.25; text-align:center; margin-top:0.25rem; margin-bottom:0.75rem;'>"
+    "<p style='margin:0;'><strong>Подготовка урока от идеи до готовых материалов — за несколько минут.</strong></p>"
+    "<p style='margin:0.4rem 0 0 0;'>Сервис помогает учителю быстро создать структурированный план занятия, подготовить раздаточные материалы, продумать беседу с классом, сформировать тестирование и интерактивную викторину. Экономит время и упрощает ежедневную подготовку.</p>"
+    "</div>",
+    unsafe_allow_html=True,
+)
+st.markdown("")
+st.markdown(
+    "<p style='font-size:120%; font-style:italic; margin:0;'>Задайте параметры урока слева. Готовый план появится справа для проверки и правок.</p>",
+    unsafe_allow_html=True,
+)
 
 # Переключение между пользовательским режимом и админ-панелью
 if "is_admin_user" not in st.session_state:
@@ -1553,7 +1567,7 @@ with col_form:
 
 with col_editor:
     # Центрируем заголовок в своей колонке
-    st.markdown("<h3 style=\"text-align:left; margin-top:0.25rem; margin-bottom:0.5rem;\">Предпросмотр плана урока</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style=\"text-align:center; margin-top:0.25rem; margin-bottom:0.5rem;\">Предпросмотр плана урока</h3>", unsafe_allow_html=True)
 
     # Оставляем только визуальный редактор (WYSIWYG), чтобы не отвлекать учителя Markdown-разметкой.
 
