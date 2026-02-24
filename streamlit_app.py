@@ -47,8 +47,26 @@ try:
 except Exception:  # pragma: no cover
     quill_editor = None
 
+# Флаги отключения Quill: через переменную окружения DISABLE_QUILL
+# или через Streamlit secrets (секция 'disable_quill').
+try:
+    disable_quill_env = str(os.getenv("DISABLE_QUILL", "")).strip().lower() in ("1", "true", "yes", "on")
+except Exception:
+    disable_quill_env = False
 
-def generate_with_deepseek(api_key: str, prompt: str, model: str = "deepseek/deepseek-chat") -> dict:
+try:
+    disable_quill_secret = bool(st.secrets.get("disable_quill", False))
+except Exception:
+    disable_quill_secret = False
+
+
+def generate_with_deepseek(
+    api_key: str,
+    prompt: str,
+    model: str = "deepseek/deepseek-chat",
+    temperature: float = 0.7,
+    max_tokens: int = 2000,
+) -> dict:
     """Универсальная функция для запросов к DeepSeek через OpenRouter.
 
     Добавлены простые повторы и увеличенный таймаут, чтобы снизить вероятность
@@ -64,8 +82,8 @@ def generate_with_deepseek(api_key: str, prompt: str, model: str = "deepseek/dee
     data = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
-        "max_tokens": 2000,
+        "temperature": float(temperature),
+        "max_tokens": int(max_tokens),
     }
 
     timeouts = [60, 90, 120]
@@ -853,6 +871,8 @@ def stream_generate_chat_via_api(*, messages: list, headers: dict, placeholder, 
             f"<div class='gen-stream-box'><pre>{safe_text}</pre></div>",
             unsafe_allow_html=True,
         )
+        # Явное требование: не давать инструкции по конвертации/сохранению внешними инструментами
+        auto_prompt += "- НЕ добавляй инструкции по конвертации/сохранению внешними инструментами (например, Pandoc), и не предлагай копировать Markdown в конвертер.\n"
 
         # Подставляем примечания учителя в авто-промпт, если поле заполнено
         quiz_notes_txt = (st.session_state.get("quiz_notes") or "").strip()
@@ -1104,7 +1124,24 @@ def _postprocess_plan_text(raw_text: str) -> str:
     while cleaned and cleaned[-1].strip() == "":
         cleaned.pop()
 
-    return "\n".join(cleaned)
+    result = "\n".join(cleaned)
+
+    # Небольшая постобработка формул/LaTeX-подобных выражений
+    # Заменяем часто встречающиеся команды на юникод-символы, чтобы
+    # в .docx формулы отображались корректно (например, S = V × t)
+    try:
+        # $...$ — убираем обрамление, оставляя содержимое
+        result = re.sub(r"\$(.*?)\$", lambda m: m.group(1), result, flags=re.S)
+        # 	imes -> ×
+        result = re.sub(r"\\times", "×", result)
+        # \cdot -> ·
+        result = re.sub(r"\\cdot", "·", result)
+        # Пробелы вокруг знака умножения: если нет, добавим для читаемости
+        result = re.sub(r"\s*×\s*", " × ", result)
+    except Exception:
+        pass
+
+    return result
 
 
 def _normalize_docx_filename(title: str) -> str:
@@ -1745,54 +1782,34 @@ with col_editor:
 
         # Предварительный просмотр переделанного фрагмента — теперь сразу под селектбокс инструкций
         with st.expander("Предварительный просмотр переделанного фрагмента", expanded=preview_has_content):
-            if (st.session_state.get("preview_src_view") or "").strip():
-                st.caption("Исходный фрагмент")
-                st.text_area(
-                    "Исходный фрагмент",
-                    height=90,
-                    disabled=True,
-                    key="preview_src_view",
-                    label_visibility="collapsed",
-                )
-            st.caption("Результат (переделанный фрагмент)")
-            st.text_area(
-                "Результат",
-                height=140,
-                key="preview_res_view",
-                label_visibility="collapsed",
-            )
+            if (st.session_state.get("talk_generated_md") or "").strip():
+                try:
+                    talk_docx_title = _normalize_material_filename(
+                        grade=talk_grade,
+                        kind="беседа",
+                        topic=talk_topic or "беседа",
+                        ext="docx",
+                    )
 
-        btn_col1, btn_col2 = st.columns([1, 1])
-        if btn_col1.button("Переделать выделенный фрагмент"):
-            instr = _current_instr()
-            if not instr:
-                st.warning("Введите инструкцию для ИИ.")
-            else:
-                req_uid = uuid.uuid4().hex
-                st.session_state["preview_pending_action"] = "rewrite"
-                st.session_state["preview_request_uid"] = req_uid
-                st.session_state["preview_request_selection"] = {"_uid": req_uid}
-                # Без дополнительного rerun: текущий прогон дойдёт до компонента,
-                # и он получит requestSelection в этом же рендере.
+                    src_md = st.session_state.get("talk_generated_md") or ""
+                    md_norm = normalize_ai_markdown(_postprocess_plan_text(src_md))
+                    html_for_docx = quill_html_utils.sanitize_html_for_quill(
+                        markdown_to_html(md_norm)
+                    )
+                    bytes_docx = _html_to_docx_bytes(html_for_docx)
 
-        can_apply = bool(st.session_state.get("preview_rewrite_range")) and bool((st.session_state.get("preview_res_view") or "").strip())
-        if btn_col2.button("Заменить выделенный фрагмент", disabled=not can_apply):
-            replacement_text = (st.session_state.get("preview_res_view") or "").strip()
-            st.session_state["preview_apply_replace"] = {
-                "range": st.session_state.get("preview_rewrite_range"),
-                "text": replacement_text,
-                "_uid": time.time(),
-            }
-            # applyReplace будет отправлен в компонент в этом же прогоне.
-
-        # Cloud-escape hatch: если Quill/Custom Components ломают фронтенд,
-        # можно отключить компонент через Secrets/ENV: DISABLE_QUILL=1
-        disable_quill_env = (os.environ.get("DISABLE_QUILL") or "").strip().lower() in ("1", "true", "yes")
-        try:
-            disable_quill_secret_raw = (st.secrets.get("DISABLE_QUILL") or "")
-        except Exception:
-            disable_quill_secret_raw = ""
-        disable_quill_secret = str(disable_quill_secret_raw).strip().lower() in ("1", "true", "yes")
+                    st.info("Беседа готова — нажмите «Скачать беседу», чтобы скачать файл.")
+                    st.download_button(
+                        "Скачать беседу",
+                        data=bytes_docx,
+                        file_name=talk_docx_title,
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        on_click="ignore",
+                        key="talk_download_docx_btn",
+                    )
+                except Exception as e:
+                    logging.exception("Error while converting talk to docx")
+                    st.error(f"Не удалось собрать .docx: {e}")
         disable_quill = disable_quill_env or disable_quill_secret
 
         evt_preview = None
@@ -2083,7 +2100,7 @@ if app_mode == "Пользовательский режим":
 
             handout_kind = st.selectbox(
                 "Формат материала",
-                ["Карточки-задания", "Рабочий лист", "Опорный конспект", "Таблица", "Схема", "Квест"],
+                ["Карточки-задания", "Рабочий лист", "Опорный конспект", "Таблица", "Квест"],
                 index=1,
                 key="handout_kind",
                 on_change=_handout_inputs_changed,
@@ -2102,7 +2119,7 @@ if app_mode == "Пользовательский режим":
             handout_elements = st.multiselect(
                 "Задания должны включать",
                 [
-                    "Теорию в рамочках",
+                    "Теорию",
                     "Примеры",
                     "Проблемные вопросы",
                     "Тесты с выбором ответа",
@@ -2151,6 +2168,7 @@ if app_mode == "Пользовательский режим":
         if "handout_generated_md" not in st.session_state:
             st.session_state["handout_generated_md"] = ""
 
+        # Формируем промпт динамически: общие требования + инструкция только для выбранного формата
         auto_prompt = (
             "Ты — опытный учитель-методист. Сгенерируй раздаточный материал ДЛЯ УЧЕНИКА по заданным параметрам.\n"
             "Вывод: строго в Markdown (без HTML), чтобы можно было сохранить в .docx.\n\n"
@@ -2165,15 +2183,20 @@ if app_mode == "Пользовательский режим":
             "- Структура: Заголовок → Краткая цель (1–2 строки) → Теория (если нужна) → Задания → Самопроверка (по желанию).\n"
             "- Язык и объём: соответствуй классу и длительности; без воды.\n"
             "- Форматирование: используй списки, таблицы (если уместно), разделители.\n"
-            "- Для 'карточки-задания' сделай 4–8 карточек с короткими заданиями.\n"
-            "- Для 'рабочий лист' сделай последовательный лист с полями для ответа (подчёркивания/пустые строки).\n"
-            "- Для 'опорный конспект' сделай краткие пункты + ключевые определения/формулы + 1–2 примера.\n"
-            "- Для 'таблица' дай таблицу для заполнения + 3–6 вопросов к ней.\n"
-            "- Для 'схема' дай схему в виде иерархического списка/блоков + вопросы.\n"
-            "- Для 'квест' сделай 5–8 шагов с подсказками и итоговым заданием.\n"
-            "- Если есть тесты с выбором ответа: 4 варианта (A–D) и в конце добавь небольшой 'Ключ ответов'.\n"
-            "- Не пиши рассуждений, только готовый материал.\n"
         )
+
+        # Инструкции, специфичные для форматов — добавляем только ту, что соответствует выбору
+        kind_instructions = {
+            "Карточки-задания": "- Для 'карточки-задания' сделай 4–8 карточек с короткими заданиями.\n",
+            "Рабочий лист": "- Для 'рабочий лист' сделай последовательный лист с полями для ответа (подчёркивания/пустые строки).\n",
+            "Опорный конспект": "- Для 'опорный конспект' сделай краткие пункты + ключевые определения/формулы + 1–2 примера.\n",
+            "Таблица": "- Для 'таблица' дай таблицу для заполнения + 3–6 вопросов к ней.\n",
+            "Квест": "- Для 'квест' сделай 5–8 шагов с подсказками и итоговым заданием.\n",
+        }
+
+        auto_prompt += kind_instructions.get(handout_kind, "")
+
+        # Если пользователь выбрал дополнительные элементы — добавляем их как требование
         if handout_elements:
             auto_prompt += "\nЗадания обязательно должны включать: " + ", ".join(handout_elements) + ".\n"
         if (handout_notes or "").strip():
@@ -2220,14 +2243,7 @@ if app_mode == "Пользовательский режим":
             st.session_state["handout_generated_md"] = ""
 
         if (st.session_state.get("handout_generated_md") or "").strip():
-            st.markdown("### Результат (можно править)")
-            st.session_state["handout_generated_md"] = st.text_area(
-                "handout_generated_md_editor",
-                value=st.session_state["handout_generated_md"],
-                height=320,
-                label_visibility="collapsed",
-            )
-
+            # Не показываем поле для редактирования результата; только кнопка скачивания
             save_cols = st.columns([1, 1, 2])
             handout_docx_title = _normalize_material_filename(
                 grade=handout_grade,
@@ -2236,7 +2252,6 @@ if app_mode == "Пользовательский режим":
                 ext="docx",
             )
 
-            # Показываем одну кнопку-скачивалку, которая отдаёт .docx напрямую (без записи на диск)
             try:
                 src_md = st.session_state.get("handout_generated_md") or ""
                 md_norm = normalize_ai_markdown(_postprocess_plan_text(src_md))
@@ -2262,8 +2277,8 @@ if app_mode == "Пользовательский режим":
                     except Exception:
                         logging.exception("Error while registering handout in DB")
 
-                # Отдаём файл клиенту напрямую — кнопка инициирует скачивание в браузере.
                 try:
+                    save_cols[0].info("Материал готов")
                     save_cols[0].download_button(
                         "Скачать раздаточный материал",
                         data=bytes_docx,
@@ -2352,8 +2367,8 @@ if app_mode == "Пользовательский режим":
         quiz_num_questions = params_cols[1].slider(
             "Вопросов",
             min_value=5,
-            max_value=30,
-            value=10,
+            max_value=15,
+            value=5,
             step=1,
             key="quiz_num_questions",
             on_change=_quiz_params_changed,
@@ -2369,10 +2384,14 @@ if app_mode == "Пользовательский режим":
         quiz_mode = params_cols[2].selectbox(
             "Тип викторины",
             ["Индивидуальная", "Командная", "Парная", "Общеклассная"],
-            index=0,
+            index=3,
             key="quiz_mode",
             on_change=_quiz_params_changed,
         )
+
+        # Убедимся, что в session_state присутствует значение по умолчанию
+        if "quiz_mode" not in st.session_state:
+            st.session_state["quiz_mode"] = "Общеклассная"
 
         quiz_dynamics = params_cols[2].selectbox(
             "Динамика",
@@ -2393,15 +2412,7 @@ if app_mode == "Пользовательский режим":
             on_change=_quiz_params_changed,
             height=80,
         )
-        quiz_time_min = params_cols[1].slider(
-            "Ориентировочное время (мин)",
-            min_value=5,
-            max_value=40,
-            value=int(st.session_state.get("quiz_time_min", 15) or 15),
-            step=5,
-            key="quiz_time_min",
-            on_change=_quiz_params_changed,
-        )
+        # Ориентировочное время удалено: параметр больше не нужен и не собирается.
 
         # Авто-промпт для викторины
         types_hint = ", ".join(quiz_types) if quiz_types else "на твой выбор"
@@ -2415,11 +2426,10 @@ if app_mode == "Пользовательский режим":
             f"Название викторины: {quiz_title or 'Викторина'}.\n"
             f"Количество вопросов: {int(quiz_num_questions)}.\n"
             f"Сложность: {quiz_difficulty}.\n"
-            f"Тип викторины: {st.session_state.get('quiz_mode', 'Индивидуальная')}.\n"
+            f"Тип викторины: {st.session_state.get('quiz_mode', 'Общеклассная')}.\n"
             f"Формат проведения: {st.session_state.get('quiz_delivery', 'Устный (ведущий читает — дети отвечают)')}.\n"
             f"Динамика: {st.session_state.get('quiz_dynamics', 'Без соревнования (познавательная)')}.\n"
-            f"Форматы вопросов: {types_hint}.\n"
-            f"Время выполнения: ~{int(quiz_time_min)} минут.\n\n"
+            f"Форматы вопросов: {types_hint}.\n\n"
             "Требования к качеству:\n"
             "- Уровень и язык: строго по возрасту/классу, без спорных/взрослых тем.\n"
             "- Проверяй факты, избегай двусмысленности формулировок.\n"
@@ -2435,7 +2445,6 @@ if app_mode == "Пользовательский режим":
             "  'grade': string,\n"
             "  'topic': string,\n"
             "  'difficulty': string,\n"
-            "  'time_minutes': number,\n"
             "  'questions': [\n"
             "    {\n"
             "      'id': number,\n"
@@ -2453,6 +2462,17 @@ if app_mode == "Пользовательский режим":
             "- multiple_choice: список индексов (например [0,2])\n"
             "- short_answer: строка\n"
         )
+
+        if "Соревновательная" in (st.session_state.get("quiz_dynamics") or ""):
+            auto_prompt += (
+                "\nДополнительные требования ТОЛЬКО для соревновательной викторины:\n"
+                f"- Количество вопросов из параметра выше ({int(quiz_num_questions)}) трактуй как число вопросов ДЛЯ КАЖДОЙ команды.\n"
+                f"- Сформируй ровно {int(quiz_num_questions)} вопросов для команды A и ровно {int(quiz_num_questions)} вопросов для команды B (итого {int(quiz_num_questions) * 2} вопросов).\n"
+                "- Вопросы должны идти парными наборами одинаковой сложности/веса: пара для A и соответствующая пара для B.\n"
+                "- За каждый вопрос обязательно начисляются баллы (целое число), у парных вопросов баллы одинаковые.\n"
+                "- Для каждого вопроса добавь поля: team ('A'|'B') и pair_id (номер парного набора).\n"
+                "- Нумерация pair_id должна быть последовательной: 1,2,3...\n"
+            )
 
         st.session_state.setdefault("quiz_prompt_autofill", True)
         if st.session_state.get("quiz_prompt_autofill"):
@@ -2483,8 +2503,16 @@ if app_mode == "Пользовательский режим":
                 st.warning("Сначала задайте тему (в форме плана урока).")
             else:
                 prompt_text = (st.session_state.get("quiz_prompt_editor") or auto_prompt).strip()
+                is_competitive = "Соревновательная" in (st.session_state.get("quiz_dynamics") or "")
+                requested_total_questions = int(quiz_num_questions) * (2 if is_competitive else 1)
+                quiz_max_tokens = min(8000, 2800 + requested_total_questions * 120)
                 with st.spinner("Генерирую викторину..."):
-                    resp = generate_with_deepseek(api_key_local, prompt_text)
+                    resp = generate_with_deepseek(
+                        api_key_local,
+                        prompt_text,
+                        temperature=0.5,
+                        max_tokens=quiz_max_tokens,
+                    )
                 raw = (
                     resp.get("choices", [{}])[0]
                     .get("message", {})
@@ -2501,23 +2529,58 @@ if app_mode == "Пользовательский режим":
                     m = re.search(r"\{.*\}", t, flags=re.S)
                     return (m.group(0) if m else t).strip()
 
-                extracted = _extract_json(raw)
-                # Попытка получить валидный JSON. Если AI вернул python-словарь
-                # с одинарными кавычками, пробуем ast.literal_eval как запасной вариант.
-                pretty = extracted
-                try:
-                    parsed = json.loads(extracted)
-                    pretty = json.dumps(parsed, ensure_ascii=False, indent=2)
-                except Exception:
+                def _try_parse_quiz_payload(text: str):
+                    extracted_local = _extract_json(text)
+                    pretty_local = extracted_local
+                    parsed_local = None
+                    parse_exc_local = None
                     try:
-                        import ast
+                        parsed_local = json.loads(extracted_local)
+                        pretty_local = json.dumps(parsed_local, ensure_ascii=False, indent=2)
+                    except Exception as e_json:
+                        parse_exc_local = e_json
+                        try:
+                            import ast
 
-                        parsed = ast.literal_eval(extracted)
-                        # Конвертируем в корректный JSON-строковый формат
-                        pretty = json.dumps(parsed, ensure_ascii=False, indent=2)
-                    except Exception:
-                        # Оставляем оригинальный извлечённый текст для ручной правки
-                        pretty = extracted
+                            parsed_literal = ast.literal_eval(extracted_local)
+                            if isinstance(parsed_literal, (dict, list)):
+                                parsed_local = parsed_literal
+                                pretty_local = json.dumps(parsed_literal, ensure_ascii=False, indent=2)
+                                parse_exc_local = None
+                        except Exception as e_ast:
+                            parse_exc_local = e_ast
+                    return pretty_local, parsed_local, parse_exc_local
+
+                pretty, parsed, parse_exc = _try_parse_quiz_payload(raw)
+
+                # Если JSON обрезан (часто при длинной викторине), делаем 1 автоповтор.
+                if parsed is None and parse_exc is not None:
+                    err_text = str(parse_exc).lower()
+                    likely_truncated = any(
+                        mark in err_text
+                        for mark in ("never closed", "unterminated", "unexpected eof", "end of data")
+                    )
+                    if likely_truncated:
+                        retry_prompt = (
+                            prompt_text
+                            + "\n\nПРЕДЫДУЩИЙ ОТВЕТ БЫЛ ОБРЕЗАН. Верни ПОЛНЫЙ JSON С НУЛЯ, строго валидный, без пояснений и без markdown."
+                        )
+                        with st.spinner("Ответ обрезан, пробую догенерировать корректный JSON..."):
+                            retry_resp = generate_with_deepseek(
+                                api_key_local,
+                                retry_prompt,
+                                temperature=0.4,
+                                max_tokens=quiz_max_tokens,
+                            )
+                        retry_raw = (
+                            retry_resp.get("choices", [{}])[0]
+                            .get("message", {})
+                            .get("content", "")
+                        )
+                        pretty_retry, parsed_retry, _ = _try_parse_quiz_payload(retry_raw)
+                        if parsed_retry is not None:
+                            pretty = pretty_retry
+                            st.info("Викторина была длинной: JSON автоматически догенерирован корректно.")
 
                 st.session_state["quiz_generated_json_text"] = pretty
 
@@ -2530,7 +2593,6 @@ if app_mode == "Пользовательский режим":
             grade = (q.get("grade") or quiz_grade or "").strip()
             topic = (q.get("topic") or quiz_topic or "").strip()
             difficulty = (q.get("difficulty") or quiz_difficulty or "").strip()
-            time_minutes = q.get("time_minutes") or quiz_time_min
 
             lines = [f"# {title}"]
             meta = []
@@ -2542,8 +2604,6 @@ if app_mode == "Пользовательский режим":
                 meta.append(f"Тема: {topic}")
             if difficulty:
                 meta.append(f"Сложность: {difficulty}")
-            if time_minutes:
-                meta.append(f"Время: ~{int(time_minutes)} мин")
             if meta:
                 lines.append("\n" + "  ".join(meta) + "\n")
 
@@ -2556,23 +2616,40 @@ if app_mode == "Пользовательский режим":
                 "short_answer": "Короткий ответ",
             }
 
-            for idx, qq in enumerate(questions, start=1):
+            def _normalize_team(raw_team):
+                team_text = (str(raw_team or "").strip().lower())
+                if team_text in {"a", "команда a", "команда 1", "1", "team a", "team 1"}:
+                    return "A"
+                if team_text in {"b", "команда b", "команда 2", "2", "team b", "team 2"}:
+                    return "B"
+                return ""
+
+            def _render_question(block_lines, qq: dict, display_index: int):
                 q_type = (qq.get("type") or "").strip()
                 q_text = (qq.get("question") or "").strip()
                 choices = qq.get("choices") or []
                 answer = qq.get("answer")
                 explanation = (qq.get("explanation") or "").strip()
+                points = qq.get("points")
+                pair_id = qq.get("pair_id")
 
-                lines.append(f"## Вопрос {idx}")
+                block_lines.append(f"### Вопрос {display_index}")
+                meta_line = []
                 if q_type:
-                    lines.append(f"Тип: {type_labels.get(q_type, q_type)}")
-                lines.append(q_text or "(без текста вопроса)")
+                    meta_line.append(f"Тип: {type_labels.get(q_type, q_type)}")
+                if pair_id not in (None, ""):
+                    meta_line.append(f"Пара: {pair_id}")
+                if points not in (None, ""):
+                    meta_line.append(f"Баллы: {points}")
+                if meta_line:
+                    block_lines.append(" | ".join(meta_line))
+                block_lines.append(q_text or "(без текста вопроса)")
 
                 if choices:
                     letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
                     for c_i, c in enumerate(choices):
                         prefix = letters[c_i] if c_i < len(letters) else str(c_i + 1)
-                        lines.append(f"- {prefix}. {(str(c) or '').strip()}")
+                        block_lines.append(f"- {prefix}. {(str(c) or '').strip()}")
 
                 answer_str = ""
                 if isinstance(answer, list):
@@ -2583,13 +2660,45 @@ if app_mode == "Пользовательский режим":
                 else:
                     answer_str = "" if answer is None else str(answer)
 
-                if answer_str or explanation:
-                    key_line = f"{idx}. Ответ: {answer_str}" if answer_str else f"{idx}. Ответ: (не указан)"
-                    if explanation:
-                        key_line += f" — {explanation}"
-                    answer_key.append(key_line)
+                key_line = f"{display_index}. Ответ: {answer_str}" if answer_str else f"{display_index}. Ответ: (не указан)"
+                if points not in (None, ""):
+                    key_line += f" | Баллы: {points}"
+                if explanation:
+                    key_line += f" — {explanation}"
+                answer_key.append(key_line)
 
-                lines.append("")
+                block_lines.append("")
+
+            team_a_questions = []
+            team_b_questions = []
+            other_questions = []
+            for qq in questions:
+                team = _normalize_team(qq.get("team"))
+                if team == "A":
+                    team_a_questions.append(qq)
+                elif team == "B":
+                    team_b_questions.append(qq)
+                else:
+                    other_questions.append(qq)
+
+            use_team_split = bool(team_a_questions or team_b_questions)
+
+            if use_team_split:
+                if team_a_questions:
+                    lines.append("## Команда A")
+                    for idx, qq in enumerate(team_a_questions, start=1):
+                        _render_question(lines, qq, idx)
+                if team_b_questions:
+                    lines.append("## Команда B")
+                    for idx, qq in enumerate(team_b_questions, start=1):
+                        _render_question(lines, qq, idx)
+                if other_questions:
+                    lines.append("## Общие вопросы")
+                    for idx, qq in enumerate(other_questions, start=1):
+                        _render_question(lines, qq, idx)
+            else:
+                for idx, qq in enumerate(questions, start=1):
+                    _render_question(lines, qq, idx)
 
             if answer_key:
                 lines.append("---")
@@ -2603,77 +2712,34 @@ if app_mode == "Пользовательский режим":
 
             return "\n".join(lines).strip() + "\n"
 
-        # Результат
+        # Результат: скрываем превью/редактор и показываем только кнопку скачивания (если JSON валиден)
         if (st.session_state.get("quiz_generated_json_text") or "").strip():
             quiz_text = st.session_state["quiz_generated_json_text"]
-
             quiz_obj = None
             parse_error = None
             try:
                 quiz_obj = json.loads(quiz_text)
             except Exception as e:
                 parse_error = e
+                try:
+                    import ast
+
+                    parsed = ast.literal_eval(quiz_text)
+                    if isinstance(parsed, dict):
+                        quiz_obj = parsed
+                        st.session_state["quiz_generated_json_text"] = json.dumps(parsed, ensure_ascii=False, indent=2)
+                        parse_error = None
+                except Exception as e2:
+                    parse_error = e2
 
             if quiz_obj and isinstance(quiz_obj, dict):
-                st.markdown("### Результат")
-                # Показываем человекочитаемый вид викторины в компактном окне.
-                try:
-                    quiz_md_preview = _quiz_to_markdown(quiz_obj)
-                    quiz_html = markdown_to_html(quiz_md_preview)
-                    # Увеличиваем размер именно для заголовков с конкретными словами
-                    try:
-                        from bs4 import BeautifulSoup
-
-                        soup = BeautifulSoup(quiz_html, "html.parser")
-                        # сравниваем без учёта регистра, ищем фразы внутри текста заголовка
-                        special = {"раздаточный материал", "конспект", "викторина"}
-                        for tag in soup.find_all(["h1", "h2", "h3"]):
-                            text = (tag.get_text(strip=True) or "").lower()
-                            if any(text == s or s in text for s in special):
-                                # Добавляем/обновляем inline-стиль для явного увеличения шрифта заголовка
-                                existing = (tag.get("style", "") or "").strip()
-                                existing = existing.rstrip(";")
-                                new_styles = "font-size:2.0rem; font-weight:800;"
-                                tag["style"] = (f"{existing}; {new_styles}" if existing else new_styles)
-                        quiz_html = str(soup)
-                    except Exception:
-                        # если BeautifulSoup недоступен или что-то пошло не так, продолжаем с исходным HTML
-                        pass
-
-                    preview_html = (
-                        "<style>"
-                        ".qa-preview h1{font-size:1.25rem;margin:0.4rem 0;}"
-                        ".qa-preview h2{font-size:1.1rem;margin:0.35rem 0;}"
-                        ".qa-preview h3{font-size:1rem;margin:0.3rem 0;}"
-                        ".qa-preview p{margin:0.25rem 0;}"
-                        "</style>"
-                        f"<div class='qa-preview' style='max-height:260px; overflow:auto; padding:0.6rem; border:1px solid #e6e6e6; background:#ffffff; border-radius:6px'>{quiz_html}</div>"
-                    )
-                    st.markdown(preview_html, unsafe_allow_html=True)
-                except Exception:
-                    st.warning("Не удалось сформировать превью викторины. Откройте JSON в экспандере для отладки.")
-
-                # Экспандер для просмотра/правки JSON скрыт по умолчанию (отладка удалена).
-            else:
-                # Некорректный JSON — показываем редактор сразу и предупреждение
-                st.markdown("### Результат (JSON — ошибка парсинга)")
-                st.warning(f"Не удалось распарсить JSON: {parse_error}")
-                st.session_state["quiz_generated_json_text"] = st.text_area(
-                    "quiz_generated_json_editor",
-                    value=st.session_state["quiz_generated_json_text"],
-                    height=320,
-                    label_visibility="collapsed",
-                )
-
-            
-
-            if isinstance(quiz_obj, dict):
                 try:
                     quiz_md = _quiz_to_markdown(quiz_obj)
                     md_norm = normalize_ai_markdown(_postprocess_plan_text(quiz_md))
                     html_for_docx = quill_html_utils.sanitize_html_for_quill(markdown_to_html(md_norm))
                     bytes_docx = _html_to_docx_bytes(html_for_docx)
 
+                    st.info("Викторина готова")
                     st.download_button(
                         "Скачать викторину (.docx)",
                         data=bytes_docx,
@@ -2690,6 +2756,8 @@ if app_mode == "Пользовательский режим":
                 except Exception as e:
                     logging.exception("Error while converting quiz to docx")
                     st.error(f"Не удалось собрать .docx: {e}")
+            else:
+                st.warning(f"Не удалось распарсить JSON викторины: {parse_error}. Сгенерируйте викторину ещё раз.")
 
         # Пустой шаблон для ручного заполнения удалён по просьбе пользователя.
         
@@ -2913,14 +2981,6 @@ if app_mode == "Пользовательский режим":
             st.session_state["test_generated_md"] = ""
 
         if st.session_state.get("test_generated_md"):
-            st.markdown("### Результат (можно править)")
-            st.session_state["test_generated_md"] = st.text_area(
-                "test_generated_md_editor",
-                value=st.session_state.get("test_generated_md", ""),
-                height=420,
-                label_visibility="collapsed",
-            )
-
             try:
                 test_docx_title = _normalize_material_filename(
                     grade=test_grade,
@@ -2933,6 +2993,7 @@ if app_mode == "Пользовательский режим":
                 html_for_docx = quill_html_utils.sanitize_html_for_quill(markdown_to_html(md_norm))
                 bytes_docx = _html_to_docx_bytes(html_for_docx)
 
+                st.info("Тест готов")
                 st.download_button(
                     "Скачать тест (.docx)",
                     data=bytes_docx,
@@ -3177,15 +3238,6 @@ if app_mode == "Пользовательский режим":
                 st.session_state["talk_generated_md"] = ""
 
             if (st.session_state.get("talk_generated_md") or "").strip():
-                st.markdown("### Результат (можно править)")
-                st.session_state["talk_generated_md"] = st.text_area(
-                    "talk_generated_md_editor",
-                    value=st.session_state["talk_generated_md"],
-                    height=360,
-                    label_visibility="collapsed",
-                )
-
-                # Сохранение результата в .docx
                 try:
                     talk_docx_title = _normalize_material_filename(
                         grade=talk_grade,
@@ -3201,10 +3253,10 @@ if app_mode == "Пользовательский режим":
                     )
                     bytes_docx = _html_to_docx_bytes(html_for_docx)
 
-                    btn_cols = st.columns([1, 1, 2])
                     try:
-                        btn_cols[0].download_button(
-                            "Сохранить docx",
+                        st.info("Беседа готова")
+                        st.download_button(
+                            "Скачать беседу",
                             data=bytes_docx,
                             file_name=talk_docx_title,
                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -3454,7 +3506,10 @@ elif app_mode == "Админ-панель":
 
                 st.markdown("---")
 
-st.caption(
-    "Разработано учителем информатики Ларченко А.П. ГУО 'Средняя школа №16 г. Минска'.\n"
-    "\nРабота ведётся в рамках проекта по цифровизации образовательного процесса. \n2026 год."
+st.markdown(
+    "<div style='text-align: right; color: #6c757d; font-size:0.95rem;'>"
+    "<p style='margin:0;'>Разработано учителем информатики Ларченко А.П. ГУО 'Средняя школа №16 г. Минска'.</p>"
+    "<p style='margin:0;'>Работа ведётся в рамках проекта по цифровизации образовательного процесса. 2026 год.</p>"
+    "</div>",
+    unsafe_allow_html=True,
 )
