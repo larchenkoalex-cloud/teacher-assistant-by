@@ -871,13 +871,6 @@ def stream_generate_chat_via_api(*, messages: list, headers: dict, placeholder, 
             f"<div class='gen-stream-box'><pre>{safe_text}</pre></div>",
             unsafe_allow_html=True,
         )
-        # Явное требование: не давать инструкции по конвертации/сохранению внешними инструментами
-        auto_prompt += "- НЕ добавляй инструкции по конвертации/сохранению внешними инструментами (например, Pandoc), и не предлагай копировать Markdown в конвертер.\n"
-
-        # Подставляем примечания учителя в авто-промпт, если поле заполнено
-        quiz_notes_txt = (st.session_state.get("quiz_notes") or "").strip()
-        if quiz_notes_txt:
-            auto_prompt += f"\nПримечания учителя: {quiz_notes_txt}\n"
 
     try:
         return openrouter_client.stream_chat_completions(
@@ -896,6 +889,62 @@ def stream_generate_chat_via_api(*, messages: list, headers: dict, placeholder, 
             )
         except Exception:
             pass
+
+        # Если провайдер вернул 5xx — попробуем fallback в non-stream режиме с ретраями
+        status_code = None
+        try:
+            status_code = getattr(getattr(e, 'response', None), 'status_code', None)
+        except Exception:
+            status_code = None
+
+        if status_code and 500 <= int(status_code) < 600:
+            try:
+                placeholder.error("⚠️ Сервер вернул ошибку 5xx. Пробуем получить ответ без потоков...")
+            except Exception:
+                pass
+
+            # Попробуем несколько таймаутов, как в generate_with_deepseek
+            timeouts = [60, 90, 120]
+            last_exc = None
+            for to in timeouts:
+                try:
+                    text = openrouter_client.chat_completions(
+                        api_key=api_key,
+                        messages=messages,
+                        model=model,
+                        temperature=0.7,
+                        max_tokens=2000,
+                        timeout=to,
+                    )
+                    # Отобразим и вернём результат
+                    try:
+                        safe_text = html.escape(text or "")
+                        placeholder.markdown(
+                            f"<div class='gen-stream-box'><pre>{safe_text}</pre></div>",
+                            unsafe_allow_html=True,
+                        )
+                    except Exception:
+                        pass
+                    return text
+                except openrouter_client.PaymentRequiredError:
+                    raise
+                except Exception as e2:
+                    last_exc = e2
+                    try:
+                        open("openrouter_debug.log", "a", encoding="utf-8").write(
+                            f"[stream_generate_chat_via_api][fallback] EXC to={to} type={type(e2).__name__} msg={e2!r}\n"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        time.sleep(1)
+                    except Exception:
+                        pass
+
+            # Если fallback не удался — пробрасываем первоначальную ошибку
+            raise
+
+        # Иначе пробрасываем исходную ошибку
         raise
 
 

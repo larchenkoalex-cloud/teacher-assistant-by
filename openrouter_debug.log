@@ -47,3 +47,9 @@
 [stream_chat_completions] status=200 content-type=text/event-stream
 [stream_chat_completions] status=200 content-type=text/event-stream
 [stream_chat_completions] status=200 content-type=text/event-stream
+[stream_chat_completions] status=500 content-type=application/json
+[stream_chat_completions] ERROR status=500 content-type=application/json body_start='{"error":{"message":"Internal Server Error","code":500}}'
+[stream_generate_chat_via_api] EXCEPTION model='deepseek/deepseek-chat' messages=1 type=HTTPError msg=HTTPError('500 Server Error: Internal Server Error for url: https://openrouter.ai/api/v1/chat/completions')
+[stream_chat_completions] status=200 content-type=text/event-stream
+[stream_generate_chat_via_api] EXCEPTION model='deepseek/deepseek-chat' messages=1 type=UnboundLocalError msg=UnboundLocalError("cannot access local variable 'auto_prompt' where it is not associated with a value")
+[stream_chat_completions] status=200 content-type=text/event-stream
